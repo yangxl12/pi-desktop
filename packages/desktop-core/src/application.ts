@@ -162,6 +162,7 @@ export class DesktopApplication {
 			skillDirectories: [...(savedSettings.skillDirectories ?? [])],
 		};
 		if (!this.settings.invokeShortcut) this.settings.invokeShortcut = defaultInvokeShortcut(this.options.platform);
+		await this.options.ports.window.setCloseToTray(this.settings.closeToTray);
 		this.projects = await this.options.metadata.listProjects();
 		this.models = await this.options.metadata.listModels();
 		this.mcpProfiles = await this.options.metadata.listMcpServers();
@@ -797,6 +798,7 @@ export class DesktopApplication {
 			next.invokeShortcut = normalizeShortcut(patch.invokeShortcut, this.options.platform);
 			await this.registerShortcut(next.invokeShortcut);
 		}
+		if (patch.closeToTray !== undefined) await this.options.ports.window.setCloseToTray(next.closeToTray);
 		await this.options.metadata.saveSettings(next);
 		this.settings = next;
 		return { ...this.settings, skillDirectories: [...this.settings.skillDirectories] };

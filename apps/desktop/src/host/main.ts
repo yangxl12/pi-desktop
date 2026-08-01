@@ -15,6 +15,7 @@ import {
 	SqliteMetadataRepository,
 } from "@earendil-works/pi-desktop-storage";
 import { exportDiagnostics } from "./diagnostics.ts";
+import { createElectronDesktopPorts } from "./electron-ports.ts";
 import { FileSingleInstancePort } from "./file-single-instance.ts";
 import { ConsoleDesktopLogger } from "./logger.ts";
 import { FetchModelConnectionTester, NativeFolderPickerPort, PlatformSecretStore } from "./platform-services.ts";
@@ -77,9 +78,11 @@ async function serveRenderer(pathname: string, response: ServerResponse): Promis
 async function main(): Promise<void> {
 	const platform = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "win32" : "linux";
 	const dataDirectory = desktopDataDirectory(platform);
-	const window = new MemoryWindowPort();
-	const tray = new MemoryTrayPort();
-	const shortcut = new MemoryShortcutPort();
+	const electronPorts = createElectronDesktopPorts();
+	const window = electronPorts?.window ?? new MemoryWindowPort();
+	const tray = electronPorts?.tray ?? new MemoryTrayPort();
+	const shortcut = electronPorts?.shortcut ?? new MemoryShortcutPort();
+	await electronPorts?.refresh();
 	const singleInstance = new FileSingleInstancePort(dataDirectory);
 	if (!(await singleInstance.acquire(() => window.show()))) {
 		console.error("Pi desktop is already running");
@@ -150,6 +153,7 @@ async function main(): Promise<void> {
 		shuttingDown = true;
 		await app.dispatch({ type: "app.quit" });
 		await new Promise<void>((resolve) => server.close(() => resolve()));
+		electronPorts?.dispose();
 	};
 	process.once("SIGINT", () => void shutdown());
 	process.once("SIGTERM", () => void shutdown());

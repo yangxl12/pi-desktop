@@ -222,6 +222,7 @@ function renderGeneralSettings(content) {
 	content.innerHTML = `<section class="settings-section"><h2>General</h2><p>Application defaults</p>
 		<div class="settings-card"><h3>Global system prompt</h3><form id="global-prompt-form"><label class="form-field"><textarea name="globalSystemPrompt">${escapeHtml(desktopState.settings.globalSystemPrompt)}</textarea></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="save"></span> Save</button></div></form></div>
 		<div class="settings-card"><h3>Global shortcut</h3><form id="shortcut-form" class="form-grid"><label class="form-field full"><input name="invokeShortcut" value="${escapeHtml(desktopState.settings.invokeShortcut)}"></label><div class="form-actions full"><button class="text-button" type="button" data-action="reset-shortcut"><span data-icon="rotate-ccw"></span> Reset</button><button class="text-button primary" type="submit"><span data-icon="save"></span> Save</button></div></form></div>
+		<div class="settings-card"><h3>Window behavior</h3><form id="window-behavior-form"><label class="form-field"><span><input name="closeToTray" type="checkbox" ${desktopState.settings.closeToTray ? "checked" : ""}> Keep Pi Desktop running in the system tray when the window is closed</span></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="save"></span> Save</button></div></form></div>
 	</section>`;
 }
 
@@ -366,6 +367,9 @@ document.addEventListener("submit", async (event) => {
 	} else if (event.target.id === "shortcut-form") {
 		event.preventDefault();
 		await run({ type: "settings.update", patch: { invokeShortcut: new FormData(event.target).get("invokeShortcut") } }, "Shortcut saved");
+	} else if (event.target.id === "window-behavior-form") {
+		event.preventDefault();
+		await run({ type: "settings.update", patch: { closeToTray: new FormData(event.target).get("closeToTray") === "on" } }, "Window behavior saved");
 	} else if (event.target.id === "skill-directory-form") {
 		event.preventDefault();
 		const directory = new FormData(event.target).get("directory");

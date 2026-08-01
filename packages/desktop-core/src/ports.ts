@@ -105,6 +105,7 @@ export interface WindowPort {
 	toggle(): Promise<void> | void;
 	minimize(): Promise<void> | void;
 	maximize(): Promise<void> | void;
+	setCloseToTray(closeToTray: boolean): Promise<void> | void;
 	close(): Promise<void> | void;
 	getState(): WindowState;
 	onChanged(listener: (state: WindowState) => void): () => void;

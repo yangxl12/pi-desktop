@@ -20,6 +20,9 @@ export class MemoryWindowPort implements WindowPort {
 	maximize(): void {
 		this.update({ maximized: !this.state.maximized, visible: true });
 	}
+	setCloseToTray(closeToTray: boolean): void {
+		this.update({ closeToTray });
+	}
 	close(): void {
 		this.update({ visible: false });
 	}

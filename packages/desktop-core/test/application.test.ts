@@ -23,6 +23,9 @@ class TestWindow {
 	maximize(): void {
 		this.state.maximized = !this.state.maximized;
 	}
+	setCloseToTray(closeToTray: boolean): void {
+		this.state.closeToTray = closeToTray;
+	}
 	close(): void {
 		this.state.visible = false;
 	}
@@ -110,5 +113,20 @@ describe("desktop application", () => {
 		const response = await app.dispatch({ type: "settings.update", patch: { invokeShortcut: "Alt+X" } });
 		expect(response.success).toBe(false);
 		expect(shortcut.registered()).toContain("Ctrl+Shift+0");
+	});
+
+	it("applies close-to-tray settings to the window port", async () => {
+		const window = new TestWindow();
+		const app = new DesktopApplication({
+			platform: "win32",
+			ports: { ...ports(), window },
+			pi: new FakePiAgentPort(),
+			metadata: new MemoryMetadataRepository(),
+		});
+		await app.initialize();
+		expect(window.getState().closeToTray).toBe(true);
+		const response = await app.dispatch({ type: "settings.update", patch: { closeToTray: false } });
+		expect(response.success).toBe(true);
+		expect(window.getState().closeToTray).toBe(false);
 	});
 });
