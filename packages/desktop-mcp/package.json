@@ -1,0 +1,32 @@
+{
+	"name": "@earendil-works/pi-desktop-mcp",
+	"version": "0.1.0",
+	"private": true,
+	"description": "MCP client, policy, and tool bridge for Pi Desktop",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": ["dist", "README.md"],
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "tsgo -p tsconfig.build.json",
+		"test": "vitest --run",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"keywords": ["pi", "desktop", "mcp"],
+	"license": "MIT",
+	"engines": { "node": ">=22.19.0" },
+	"dependencies": {
+		"@modelcontextprotocol/sdk": "1.30.0"
+	},
+	"devDependencies": {
+		"shx": "0.4.0",
+		"vitest": "4.1.9"
+	}
+}

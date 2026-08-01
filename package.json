@@ -1,0 +1,23 @@
+{
+	"name": "pi-desktop",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"workspaces": ["apps/*", "packages/*"],
+	"scripts": {
+		"check": "biome check --write --error-on-warnings . && tsgo --noEmit",
+		"test:desktop-core": "npm run test --workspace=@earendil-works/pi-desktop-core",
+		"test:desktop-mcp": "npm run test --workspace=@earendil-works/pi-desktop-mcp",
+		"test:desktop-pi-bridge": "npm run test --workspace=@earendil-works/pi-desktop-pi-bridge",
+		"test:desktop-protocol": "npm run test --workspace=@earendil-works/pi-desktop-protocol",
+		"test:desktop-storage": "npm run test --workspace=@earendil-works/pi-desktop-storage"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"@types/node": "22.19.19",
+		"@typescript/native-preview": "7.0.0-dev.20260120.1"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}

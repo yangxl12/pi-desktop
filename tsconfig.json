@@ -1,0 +1,22 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"paths": {
+			"@earendil-works/pi-desktop-protocol": ["./packages/desktop-protocol/src/index.ts"],
+			"@earendil-works/pi-desktop-protocol/*": ["./packages/desktop-protocol/src/*"],
+			"@earendil-works/pi-desktop-core": ["./packages/desktop-core/src/index.ts"],
+			"@earendil-works/pi-desktop-core/*": ["./packages/desktop-core/src/*"],
+			"@earendil-works/pi-desktop-pi-bridge": ["./packages/desktop-pi-bridge/src/index.ts"],
+			"@earendil-works/pi-desktop-pi-bridge/*": ["./packages/desktop-pi-bridge/src/*"],
+			"@earendil-works/pi-desktop-storage": ["./packages/desktop-storage/src/index.ts"],
+			"@earendil-works/pi-desktop-storage/*": ["./packages/desktop-storage/src/*"],
+			"@earendil-works/pi-desktop-mcp": ["./packages/desktop-mcp/src/index.ts"],
+			"@earendil-works/pi-desktop-mcp/*": ["./packages/desktop-mcp/src/*"]
+		}
+	},
+	"include": ["apps/desktop/src/**/*.ts", "packages/*/src/**/*.ts", "packages/*/test/**/*.ts"],
+	"exclude": ["**/dist/**"]
+}

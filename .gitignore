@@ -1,0 +1,27 @@
+node_modules/
+dist/
+.artifacts/
+*.log
+*.tsbuildinfo
+
+# Local desktop runtime, packaging, and session data
+.pi-dev/
+.pi-desktop/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editor files
+.vscode/
+.zed/
+.idea/
+*.swp
+*.swo
+*~

@@ -1,0 +1,12 @@
+{
+	"productName": "Pi Desktop",
+	"bundleId": "works.earendil.pi.desktop",
+	"targets": {
+		"win32-x64": { "format": ["msi", "nsis"], "installerScope": "user", "signingRequired": true },
+		"darwin-arm64": { "format": ["dmg", "app"], "hardenedRuntime": true, "notarizationRequired": true },
+		"darwin-x64": { "format": ["dmg", "app"], "hardenedRuntime": true, "notarizationRequired": true }
+	},
+	"sidecar": { "runtime": "node", "version": ">=22.19.0", "checksumRequired": true },
+	"upgrade": { "atomicInstall": true, "rollbackOnStartupFailure": true, "preserveDataDirectory": true },
+	"uninstall": { "removeAppData": false, "removeAppDataFlag": "--purge-data" }
+}

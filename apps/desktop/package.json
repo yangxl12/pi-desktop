@@ -1,0 +1,33 @@
+{
+	"name": "@earendil-works/pi-desktop",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"main": ".pi-dev/electron-build/main.mjs",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"dev": "tsx src/host/main.ts",
+		"spike": "tsx src/host/spike.ts",
+		"build": "tsgo -p tsconfig.json",
+		"package:sidecar": "node scripts/package-sidecar.mjs",
+		"package:manifest": "node scripts/write-release-manifest.mjs",
+		"package:windows": "node scripts/build-windows-installer.mjs",
+		"release:preflight": "node scripts/release-preflight.mjs"
+	},
+	"dependencies": {
+		"@earendil-works/pi-desktop-core": "0.1.0",
+		"@earendil-works/pi-desktop-mcp": "0.1.0",
+		"@earendil-works/pi-desktop-pi-bridge": "0.1.0",
+		"@earendil-works/pi-desktop-protocol": "0.1.0",
+		"@earendil-works/pi-desktop-storage": "0.1.0",
+		"lucide": "1.27.0"
+	},
+	"devDependencies": {
+		"electron": "43.2.0",
+		"electron-builder": "26.15.3",
+		"esbuild": "0.28.1",
+		"tsx": "4.22.1"
+	}
+}

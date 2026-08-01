@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Pi Desktop</title>
+	<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+	<div id="app" class="app-shell">
+		<aside class="sidebar">
+			<div class="brand-row">
+				<div class="brand-mark">P</div>
+				<div><strong>Pi Desktop</strong><span class="eyebrow">LOCAL AGENT</span></div>
+				<button class="icon-button" data-action="add-project" title="Add project" aria-label="Add project"><span data-icon="plus"></span></button>
+			</div>
+			<div class="sidebar-label"><span>Projects</span><span id="project-count">0</span></div>
+			<div id="projects" class="project-tree"></div>
+			<div class="sidebar-spacer"></div>
+			<div class="runtime-mini"><span id="runtime-dot" class="status-dot"></span><span id="runtime-mini-label">No runtime</span></div>
+			<button class="sidebar-settings" data-action="open-settings" title="Settings" aria-label="Settings"><span data-icon="settings"></span><span>Settings</span></button>
+		</aside>
+		<main class="workspace">
+			<section id="chat-view" class="view">
+				<header class="topbar">
+					<div class="breadcrumb"><span id="project-title">No project</span><span class="crumb-slash">/</span><strong id="session-title">New conversation</strong></div>
+					<div class="topbar-controls">
+						<label class="compact-control"><span>Model</span><select id="model-select" aria-label="Model"></select></label>
+						<label class="compact-control"><span>Thinking</span><select id="thinking-select" aria-label="Thinking level"><option value="off">Off</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">X-high</option><option value="max">Max</option></select></label>
+						<button class="icon-button" data-action="open-settings" title="Settings" aria-label="Settings"><span data-icon="settings"></span></button>
+					</div>
+				</header>
+				<div id="trust-banner" class="trust-banner hidden"></div>
+				<div id="messages" class="messages"></div>
+				<div id="error-row" class="error-row hidden"></div>
+				<section class="composer-wrap">
+					<div id="slash-menu" class="slash-menu hidden"></div>
+					<div id="queue-controls" class="queue-controls hidden"><span>While streaming</span><button data-queue="steer">Steer</button><button data-queue="followUp">Follow up</button></div>
+					<form id="prompt-form" class="composer">
+						<textarea id="prompt-input" rows="3" placeholder="Ask Pi to work in this project" aria-label="Message Pi"></textarea>
+						<div class="composer-footer"><span id="composer-hint" class="muted">Enter to send; Shift+Enter for a new line</span><div class="composer-actions"><button class="icon-button" type="button" data-action="clear-prompt" title="Clear message" aria-label="Clear message"><span data-icon="x"></span></button><button class="send-button" type="submit" title="Send message" aria-label="Send message"><span data-icon="send"></span></button><button class="stop-button hidden" type="button" data-action="abort" title="Stop response" aria-label="Stop response"><span data-icon="square"></span></button></div></div>
+					</form>
+				</section>
+			</section>
+			<section id="settings-view" class="view settings-view hidden">
+				<header class="topbar"><div class="breadcrumb"><strong>Settings</strong><span class="crumb-slash">/</span><span id="settings-section-title">Models</span></div><button class="icon-button" data-action="close-settings" title="Back to chat" aria-label="Back to chat"><span data-icon="arrow-left"></span></button></header>
+				<div class="settings-layout">
+					<nav class="settings-nav"><button class="settings-tab active" data-settings-tab="models"><span data-icon="cpu"></span>Models</button><button class="settings-tab" data-settings-tab="general"><span data-icon="sliders-horizontal"></span>General</button><button class="settings-tab" data-settings-tab="skills"><span data-icon="sparkles"></span>Skills</button><button class="settings-tab" data-settings-tab="mcp"><span data-icon="plug"></span>MCP</button><button class="settings-tab" data-settings-tab="diagnostics"><span data-icon="activity"></span>Diagnostics</button></nav>
+					<div id="settings-content" class="settings-content"></div>
+				</div>
+			</section>
+		</main>
+	</div>
+	<div id="toast" class="toast hidden" role="status"></div>
+	<script type="module" src="/app.js"></script>
+</body>
+</html>
