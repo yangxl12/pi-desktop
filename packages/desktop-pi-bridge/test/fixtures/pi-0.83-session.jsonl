@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"fixture-session-083","timestamp":"2026-08-02T00:00:00.000Z","cwd":"C:\\workspace\\fixture"}
+{"type":"model_change","id":"model-change-1","parentId":null,"timestamp":"2026-08-02T00:00:01.000Z","provider":"openai","modelId":"gpt-fixture"}
+{"type":"thinking_level_change","id":"thinking-1","parentId":"model-change-1","timestamp":"2026-08-02T00:00:02.000Z","thinkingLevel":"high"}
+{"type":"message","id":"user-1","parentId":"thinking-1","timestamp":"2026-08-02T00:00:03.000Z","message":{"role":"user","content":"fixture prompt"}}
+{"type":"message","id":"assistant-1","parentId":"user-1","timestamp":"2026-08-02T00:00:04.000Z","message":{"role":"assistant","provider":"openai","model":"gpt-fixture","content":[{"type":"text","text":"fixture reply"}],"stopReason":"stop"}}

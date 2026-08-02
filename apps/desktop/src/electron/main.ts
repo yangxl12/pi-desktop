@@ -92,7 +92,9 @@ function toggleWindow(): void {
 async function waitForHost(): Promise<void> {
 	for (let attempt = 0; attempt < 60; attempt += 1) {
 		try {
-			const response = await fetch(`http://127.0.0.1:${port}/api/state`);
+			const response = await fetch(`http://127.0.0.1:${port}/api/state`, {
+				headers: { "x-pi-desktop-token": hostToken },
+			});
 			if (response.ok) return;
 		} catch {}
 		await new Promise<void>((resolve) => setTimeout(resolve, 250));
@@ -130,8 +132,8 @@ async function showWindow(): Promise<void> {
 	if (!host) startHost();
 	try {
 		await waitForHost();
-		if (window.webContents.getURL() !== `http://127.0.0.1:${port}/`)
-			await window.loadURL(`http://127.0.0.1:${port}/`);
+		const hostUrl = `http://127.0.0.1:${port}/#hostToken=${encodeURIComponent(hostToken)}`;
+		if (window.webContents.getURL() !== hostUrl) await window.loadURL(hostUrl);
 	} catch (error: unknown) {
 		await window.loadURL(
 			`data:text/html;charset=utf-8,${encodeURIComponent(`<h1>Pi Desktop failed to start</h1><pre>${error instanceof Error ? error.message : String(error)}</pre>`)}`,

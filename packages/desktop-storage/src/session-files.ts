@@ -1,7 +1,12 @@
 import { access, readdir, readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
-import type { SessionFileRepository, SessionFileSummary, SessionScanResult } from "@earendil-works/pi-desktop-core";
-import type { ThinkingLevel } from "@earendil-works/pi-desktop-protocol";
+import type {
+	SessionCodec,
+	SessionFileRepository,
+	SessionFileSummary,
+	SessionScanResult,
+} from "@earendil-works/pi-desktop-core";
+import type { DesktopMessage, MessagePart, ThinkingLevel } from "@earendil-works/pi-desktop-protocol";
 import { DesktopError } from "@earendil-works/pi-desktop-protocol";
 
 interface JsonRecord {
@@ -14,6 +19,15 @@ function asRecord(value: unknown): JsonRecord | undefined {
 
 function asString(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
+}
+
+function timestamp(value: unknown): string {
+	if (typeof value === "number") return new Date(value).toISOString();
+	if (typeof value === "string") {
+		const parsed = new Date(value);
+		if (!Number.isNaN(parsed.valueOf())) return parsed.toISOString();
+	}
+	return new Date().toISOString();
 }
 
 function messageText(message: JsonRecord): string {
@@ -31,7 +45,27 @@ function thinkingLevel(value: unknown): ThinkingLevel {
 		: "off";
 }
 
-export class PiSessionFileRepository implements SessionFileRepository {
+export class PiSessionCodec implements SessionCodec {
+	readonly id = "pi-jsonl";
+	readonly formatVersion = 3;
+	private readonly cache = new Map<string, { size: number; mtimeMs: number; summary: SessionFileSummary }>();
+
+	canRead(sessionPath: string): Promise<boolean> {
+		return this.exists(sessionPath);
+	}
+
+	async identify(sessionPath: string): Promise<{ codecId: string; formatVersion: number } | null> {
+		try {
+			const summary = await this.readSummary(sessionPath);
+			return {
+				codecId: summary.sessionCodecId ?? this.id,
+				formatVersion: summary.sessionFormatVersion ?? this.formatVersion,
+			};
+		} catch {
+			return null;
+		}
+	}
+
 	async exists(sessionPath: string): Promise<boolean> {
 		try {
 			await access(sessionPath);
@@ -41,7 +75,7 @@ export class PiSessionFileRepository implements SessionFileRepository {
 		}
 	}
 
-	async read(sessionPath: string): Promise<SessionFileSummary> {
+	async readSummary(sessionPath: string): Promise<SessionFileSummary> {
 		let content: string;
 		try {
 			content = await readFile(sessionPath, "utf8");
@@ -97,7 +131,7 @@ export class PiSessionFileRepository implements SessionFileRepository {
 		}
 		const fileStats = await stat(sessionPath);
 		if (updatedAt === new Date(0).toISOString()) updatedAt = fileStats.mtime.toISOString();
-		return {
+		const summary: SessionFileSummary = {
 			id: asString(header.id) ?? basename(sessionPath, ".jsonl"),
 			sessionPath,
 			title: title ?? firstUserText?.slice(0, 72) ?? "New conversation",
@@ -108,7 +142,74 @@ export class PiSessionFileRepository implements SessionFileRepository {
 			thinkingLevel: level,
 			leafId,
 			hasMessages,
+			runtimeProviderId: "pi",
+			runtimeSessionRef: sessionPath,
+			sessionCodecId: this.id,
+			sessionFormatVersion: typeof header.version === "number" ? header.version : this.formatVersion,
+			historyAccess: "continue",
 		};
+		this.cache.set(sessionPath, { size: fileStats.size, mtimeMs: fileStats.mtimeMs, summary });
+		return summary;
+	}
+
+	/** Compatibility name retained for the pre-codec SessionFileRepository contract. */
+	read(sessionPath: string): Promise<SessionFileSummary> {
+		return this.readSummary(sessionPath);
+	}
+
+	async readMessages(sessionPath: string): Promise<DesktopMessage[]> {
+		let content: string;
+		try {
+			content = await readFile(sessionPath, "utf8");
+		} catch (_error: unknown) {
+			throw new DesktopError("NOT_FOUND", "Session file is missing", { sessionPath });
+		}
+		const messages: DesktopMessage[] = [];
+		for (const line of content.split("\n")) {
+			if (!line.trim()) continue;
+			let entry: JsonRecord;
+			try {
+				const parsed = asRecord(JSON.parse(line));
+				if (!parsed) continue;
+				entry = parsed;
+			} catch {
+				throw new DesktopError("PROTOCOL_ERROR", "Session file contains invalid JSONL", { sessionPath });
+			}
+			if (entry.type !== "message") continue;
+			const message = asRecord(entry.message);
+			if (!message) continue;
+			const role =
+				message.role === "user" || message.role === "assistant" || message.role === "system"
+					? message.role
+					: "tool";
+			const rawContent = message.content;
+			const parts: MessagePart[] = [];
+			if (Array.isArray(rawContent)) {
+				for (const part of rawContent) {
+					const value = asRecord(part);
+					if (!value) continue;
+					if (value.type === "thinking") parts.push({ type: "thinking", text: asString(value.thinking) ?? "" });
+					else if (value.type === "toolCall")
+						parts.push({
+							type: "tool",
+							text: JSON.stringify(value.arguments ?? ""),
+							toolName: asString(value.name),
+							toolCallId: asString(value.id),
+							status: "started",
+						});
+					else parts.push({ type: "text", text: asString(value.text) ?? "" });
+				}
+			} else parts.push({ type: role === "tool" ? "tool" : "text", text: asString(rawContent) ?? "" });
+			messages.push({
+				id: asString(message.id) ?? `${role}-${messages.length}`,
+				role,
+				parts: parts.length ? parts : [{ type: "text", text: "" }],
+				createdAt: timestamp(message.timestamp),
+				status:
+					message.stopReason === "aborted" ? "aborted" : message.stopReason === "error" ? "error" : "finished",
+			});
+		}
+		return messages;
 	}
 
 	async scan(sessionDirectory: string): Promise<SessionScanResult> {
@@ -124,7 +225,13 @@ export class PiSessionFileRepository implements SessionFileRepository {
 		for (const file of files) {
 			const sessionPath = join(sessionDirectory, file);
 			try {
-				sessions.push(await this.read(sessionPath));
+				const fileStats = await stat(sessionPath);
+				const cached = this.cache.get(sessionPath);
+				if (cached && cached.size === fileStats.size && cached.mtimeMs === fileStats.mtimeMs) {
+					sessions.push(cached.summary);
+				} else {
+					sessions.push(await this.readSummary(sessionPath));
+				}
 			} catch (error: unknown) {
 				diagnostics.push(`${file}: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -132,3 +239,6 @@ export class PiSessionFileRepository implements SessionFileRepository {
 		return { sessions, diagnostics };
 	}
 }
+
+/** Pre-codec name kept for existing callers and migration compatibility. */
+export class PiSessionFileRepository extends PiSessionCodec implements SessionFileRepository {}

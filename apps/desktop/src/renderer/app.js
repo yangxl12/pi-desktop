@@ -758,11 +758,28 @@ function scheduleRender() {
 
 function eventBelongsToActiveRuntime(event) {
 	const runtime = desktopState?.runtime;
+	if (event.type?.startsWith("mcp.")) return true;
 	return !runtime || (event.runtimeId === runtime.runtimeId && event.sessionId === runtime.sessionId);
 }
 
 function applyDesktopEvent(event) {
 	if (!desktopState || !event || !event.type || !eventBelongsToActiveRuntime(event)) return false;
+	if (event.type === "mcp.consentRequired") {
+		const request = event.request;
+		if (request) {
+			const approved = window.confirm(`Allow MCP tool ${request.serverId}.${request.toolName} for this project?`);
+			void run({ type: "mcp.consent.respond", requestId: request.requestId, approved, scope: "once" });
+		}
+		return true;
+	}
+	if (event.type === "mcp.consentResolved") {
+		if (desktopState.consentRequests) desktopState.consentRequests = desktopState.consentRequests.filter((request) => request.requestId !== event.requestId);
+		return true;
+	}
+	if (event.type === "mcp.serverChanged" || event.type === "mcp.toolsChanged") {
+		scheduleRefresh(false);
+		return true;
+	}
 	if (event.type === "message.started") {
 		const message = { ...event.message, parts: event.message.parts.map((part) => ({ ...part })) };
 		const existingIndex = desktopState.messages.findIndex((candidate) => candidate.id === message.id);

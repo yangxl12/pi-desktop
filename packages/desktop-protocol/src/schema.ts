@@ -169,6 +169,12 @@ export function isDesktopCommand(value: unknown): value is DesktopCommand {
 	if (type === "mcp.delete" || type === "mcp.testConnection") return isNonEmptyString(value.serverId);
 	if (type === "mcp.setEnabled") return isNonEmptyString(value.serverId) && typeof value.enabled === "boolean";
 	if (type === "mcp.listTools") return value.projectId === undefined || isNonEmptyString(value.projectId);
+	if (type === "mcp.consent.respond")
+		return (
+			isNonEmptyString(value.requestId) &&
+			typeof value.approved === "boolean" &&
+			(value.scope === undefined || ["once", "session", "project"].includes(value.scope as string))
+		);
 	return false;
 }
 

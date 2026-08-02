@@ -16,7 +16,7 @@
 		"package:manifest": "node scripts/write-release-manifest.mjs",
 		"package:windows": "node scripts/build-windows-installer.mjs",
 		"release:preflight": "node scripts/release-preflight.mjs",
-		"test": "vitest --run test/electron-ports.test.ts"
+		"test": "vitest --run test"
 	},
 	"dependencies": {
 		"@earendil-works/pi-desktop-core": "0.1.0",

@@ -6,6 +6,27 @@ export type ConversationStatus = "idle" | "streaming" | "error" | "aborted";
 
 export type QueueMode = "prompt" | "steer" | "followUp";
 
+/** Opaque handle owned by a runtime provider. Pi currently uses a file path. */
+export type RuntimeSessionRef = string;
+
+export interface RuntimeCapabilities {
+	prompt: boolean;
+	steer: boolean;
+	followUp: boolean;
+	abort: boolean;
+	sessionCreate: boolean;
+	sessionSwitch: boolean;
+	messageRead: boolean;
+	streaming: boolean;
+	toolCalling: boolean;
+	skills: boolean;
+	commands: boolean;
+	thinkingLevel: boolean;
+	modelSwitch: boolean;
+	modelStreaming: boolean;
+	multimodal: boolean;
+}
+
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type AppLocale = "zh-CN" | "en";
@@ -53,8 +74,30 @@ export interface McpTool {
 	namespacedName: string;
 }
 
+/** Runtime-neutral tool metadata exposed to the core and renderer. */
+export interface ToolDescriptor {
+	name: string;
+	namespace?: string;
+	description?: string;
+	inputSchema: Record<string, unknown>;
+	source: "mcp" | "builtin" | "web-search" | string;
+	projectScope?: string | null;
+	trustRequirement?: "trusted-project" | "none";
+	consentRequirement?: "always" | "untrusted-project" | "never";
+}
+
+export interface McpConsentRequest {
+	requestId: string;
+	serverId: string;
+	toolName: string;
+	projectId: string | null;
+	/** A redacted summary only; raw tool arguments never enter public state. */
+	argumentsSummary?: string;
+}
+
 export type DesktopErrorCode =
 	| "INVALID_ARGUMENT"
+	| "UNAUTHORIZED"
 	| "NOT_FOUND"
 	| "CONFLICT"
 	| "NOT_READY"
@@ -79,6 +122,12 @@ export interface ConversationIndex {
 	id: string;
 	projectId: string;
 	sessionPath: string;
+	/** Runtime-neutral metadata added during the provider/codec migration. */
+	runtimeProviderId?: string;
+	runtimeSessionRef?: RuntimeSessionRef | null;
+	sessionCodecId?: string;
+	sessionFormatVersion?: number | null;
+	historyAccess?: "continue" | "read-only" | "import-required" | "missing";
 	title: string;
 	createdAt: string;
 	updatedAt: string;
@@ -168,6 +217,9 @@ export interface RuntimeSnapshot extends RuntimeIdentity {
 	modelProvider: string | null;
 	modelId: string | null;
 	sessionPath: string | null;
+	runtimeSessionRef?: RuntimeSessionRef | null;
+	providerId?: string | null;
+	capabilities?: RuntimeCapabilities;
 	messageCount: number;
 	lastError: string | null;
 }
@@ -209,6 +261,7 @@ export interface DesktopState {
 	commands: SkillCommand[];
 	mcpServers: McpServerSnapshot[];
 	mcpTools: McpTool[];
+	consentRequests: McpConsentRequest[];
 	settings: AppSettings;
 	diagnostics: Diagnostic[];
 }

@@ -4,6 +4,7 @@ import type {
 	DesktopEventListener,
 	DesktopMessage,
 	Diagnostic,
+	McpConsentRequest,
 	McpServerProfile,
 	McpServerSnapshot,
 	McpTool,
@@ -16,91 +17,64 @@ import type {
 	WindowState,
 } from "@earendil-works/pi-desktop-protocol";
 
-export interface PiRuntimeModel {
-	providerId: string;
-	displayName: string;
-	baseUrl: string;
-	modelId: string;
-	apiKey: string | null;
+export type {
+	AgentEvent,
+	AgentEventPayload,
+	AgentRuntimePort,
+	RuntimeCapabilities,
+	RuntimeCommand,
+	RuntimeModel,
+	RuntimeSessionRef,
+	RuntimeStartOptions,
+	RuntimeState,
+	RuntimeToolDefinition,
+} from "./runtime-contract.ts";
+
+export interface McpPortEvent {
+	type:
+		| "server.started"
+		| "server.stopped"
+		| "server.error"
+		| "tools.changed"
+		| "tool.started"
+		| "tool.finished"
+		| string;
+	serverId?: string;
+	snapshot?: McpServerSnapshot;
+	tools?: McpTool[];
+	error?: string;
+	requestId?: string;
+	toolName?: string;
+	failed?: boolean;
+	request?: McpConsentRequest;
+	approved?: boolean;
 }
 
-export interface PiRuntimeOptions {
-	cwd: string;
-	sessionPath?: string;
-	sessionDirectory: string;
-	agentDirectory: string;
-	globalSystemPrompt?: string;
-	projectTrusted?: boolean;
-	skillDirectories: string[];
-	extensionPaths: string[];
-	env: Record<string, string>;
-	sensitiveValues: string[];
-	models: PiRuntimeModel[];
-	selectedModel?: { providerId: string; modelId: string };
-	thinkingLevel: ThinkingLevel;
-	runtimeId: string;
-}
+import type {
+	AgentEvent,
+	AgentEventPayload,
+	AgentRuntimePort,
+	RuntimeCommand,
+	RuntimeModel,
+	RuntimeStartOptions,
+	RuntimeState,
+	RuntimeToolDefinition,
+} from "./runtime-contract.ts";
 
-export interface PiAgentState {
-	isStreaming: boolean;
-	thinkingLevel: ThinkingLevel;
-	modelProvider: string | null;
-	modelId: string | null;
+/** Compatibility aliases. New code should use the runtime-neutral names. */
+export type PiRuntimeModel = RuntimeModel;
+export type PiRuntimeOptions = RuntimeStartOptions;
+export type PiCommandInfo = RuntimeCommand;
+export type PiAgentEvent = AgentEvent;
+export type PiAgentEventPayload = AgentEventPayload;
+export interface PiAgentState extends RuntimeState {
 	sessionPath: string | null;
-	sessionId: string | null;
-	messageCount: number;
 }
-
-export interface PiCommandInfo {
-	name: string;
-	description?: string;
-	source: string;
-	path?: string;
-	scope?: "user" | "project" | "temporary";
-}
-
-export type PiAgentEvent =
-	| { type: "ready"; runtimeId: string; state: PiAgentState }
-	| { type: "state_changed"; runtimeId: string; state: Partial<PiAgentState> }
-	| { type: "message_started"; runtimeId: string; message: DesktopMessage }
-	| { type: "message_delta"; runtimeId: string; messageId: string; part: "text" | "thinking"; delta: string }
-	| { type: "message_finished"; runtimeId: string; message: DesktopMessage }
-	| { type: "tool_started"; runtimeId: string; messageId: string; toolName: string; toolCallId: string }
-	| { type: "tool_update"; runtimeId: string; messageId: string; toolCallId: string; text: string }
-	| {
-			type: "tool_finished";
-			runtimeId: string;
-			messageId: string;
-			toolCallId: string;
-			text: string;
-			failed: boolean;
-	  }
-	| { type: "aborted"; runtimeId: string; messageId?: string }
-	| { type: "diagnostic"; runtimeId: string; level: Diagnostic["level"]; message: string }
-	| { type: "error"; runtimeId: string; error: string };
-
-export type PiAgentEventPayload = PiAgentEvent extends infer T
-	? T extends { runtimeId: string }
-		? Omit<T, "runtimeId">
-		: never
-	: never;
-
-export interface PiAgentPort {
+export interface PiAgentPort extends AgentRuntimePort {
 	start(options: PiRuntimeOptions): Promise<PiAgentState>;
-	stop(): Promise<void>;
-	prompt(message: string): Promise<void>;
-	steer(message: string): Promise<void>;
-	followUp(message: string): Promise<void>;
-	abort(): Promise<void>;
 	getState(): Promise<PiAgentState>;
-	getMessages(): Promise<DesktopMessage[]>;
-	getCommands(): Promise<PiCommandInfo[]>;
 	newSession(): Promise<PiAgentState>;
 	switchSession(sessionPath: string): Promise<PiAgentState>;
-	setSessionName(name: string): Promise<void>;
-	setThinkingLevel(level: ThinkingLevel): Promise<void>;
-	setModel(provider: string, modelId: string): Promise<void>;
-	subscribe(listener: (event: PiAgentEvent) => void): () => void;
 }
 
 export interface WindowPort {
@@ -161,7 +135,10 @@ export interface McpPort {
 	stopAll(reason?: string): Promise<void>;
 	test(profile: McpServerProfile): Promise<McpServerSnapshot>;
 	listTools(projectId?: string): McpTool[];
-	subscribe(listener: (event: { type: string; serverId: string }) => void): () => void;
+	listToolDefinitions?(projectId?: string, trusted?: boolean): RuntimeToolDefinition[];
+	respondConsent?(requestId: string, approved: boolean, scope?: "once" | "session" | "project"): boolean;
+	dispose?(): void;
+	subscribe(listener: (event: McpPortEvent) => void): () => void;
 }
 
 export interface SecretStore {
@@ -181,6 +158,11 @@ export interface SessionFileSummary {
 	thinkingLevel: ThinkingLevel;
 	leafId: string | null;
 	hasMessages: boolean;
+	runtimeProviderId?: string;
+	runtimeSessionRef?: string | null;
+	sessionCodecId?: string;
+	sessionFormatVersion?: number | null;
+	historyAccess?: "continue" | "read-only" | "import-required" | "missing";
 }
 
 export interface SessionScanResult {
@@ -192,6 +174,7 @@ export interface SessionFileRepository {
 	exists(sessionPath: string): Promise<boolean>;
 	read(sessionPath: string): Promise<SessionFileSummary>;
 	scan(sessionDirectory: string): Promise<SessionScanResult>;
+	readMessages?(sessionPath: string): Promise<DesktopMessage[]>;
 }
 
 export interface ModelConnectionTester {
@@ -227,6 +210,6 @@ export type PromptDispatch = (message: string, queueMode: QueueMode) => Promise<
 
 export interface RuntimeView extends RuntimeSnapshot {}
 
-export function asSkillCommand(command: PiCommandInfo): SkillCommand {
+export function asSkillCommand(command: RuntimeCommand): SkillCommand {
 	return { ...command };
 }

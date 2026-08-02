@@ -8,6 +8,7 @@ import type {
 	PiCommandInfo,
 	PiRuntimeOptions,
 } from "@earendil-works/pi-desktop-core";
+import { DEFAULT_RUNTIME_CAPABILITIES } from "@earendil-works/pi-desktop-core";
 import type { DesktopMessage, ThinkingLevel } from "@earendil-works/pi-desktop-protocol";
 
 function assistantMessage(text = ""): DesktopMessage {
@@ -35,8 +36,10 @@ export class FakePiAgentPort implements PiAgentPort {
 		modelProvider: null,
 		modelId: null,
 		sessionPath: null,
+		sessionRef: null,
 		sessionId: null,
 		messageCount: 0,
+		capabilities: { ...DEFAULT_RUNTIME_CAPABILITIES },
 	};
 	private started = false;
 	private currentMessage: DesktopMessage | undefined;
@@ -61,6 +64,7 @@ export class FakePiAgentPort implements PiAgentPort {
 		this.state = {
 			...this.state,
 			sessionPath,
+			sessionRef: sessionPath,
 			sessionId: randomUUID(),
 			thinkingLevel: options.thinkingLevel,
 			modelProvider: options.selectedModel?.providerId ?? null,
@@ -168,9 +172,11 @@ export class FakePiAgentPort implements PiAgentPort {
 
 	async newSession(): Promise<PiAgentState> {
 		this.messages.length = 0;
+		const sessionPath = join("fake-sessions", `fake-${randomUUID()}.jsonl`);
 		this.state = {
 			...this.state,
-			sessionPath: join("fake-sessions", `fake-${randomUUID()}.jsonl`),
+			sessionPath,
+			sessionRef: sessionPath,
 			sessionId: randomUUID(),
 			messageCount: 0,
 		};
@@ -180,6 +186,7 @@ export class FakePiAgentPort implements PiAgentPort {
 	async switchSession(sessionPath: string): Promise<PiAgentState> {
 		this.messages.length = 0;
 		this.state = { ...this.state, sessionPath, sessionId: randomUUID(), messageCount: 0 };
+		this.state.sessionRef = sessionPath;
 		return { ...this.state };
 	}
 

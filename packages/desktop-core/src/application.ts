@@ -9,6 +9,7 @@ import type {
 	DesktopResponse,
 	DesktopState,
 	Diagnostic,
+	McpConsentRequest,
 	McpServerDraft,
 	McpServerPatch,
 	McpServerProfile,
@@ -29,14 +30,15 @@ import { DEFAULT_APP_SETTINGS } from "./memory-repository.ts";
 import { normalizeModelBaseUrl } from "./models.ts";
 import { canonicalizeProjectPath, canonicalizeResourcePath, projectName } from "./paths.ts";
 import type {
+	AgentEvent,
+	AgentRuntimePort,
 	DesktopHostPorts,
 	DesktopLogger,
 	McpPort,
+	McpPortEvent,
 	MetadataRepository,
 	ModelConnectionTester,
-	PiAgentEvent,
-	PiAgentPort,
-	PiRuntimeModel,
+	RuntimeModel,
 	SecretStore,
 	SessionFileRepository,
 	SessionFileSummary,
@@ -46,7 +48,11 @@ import { defaultInvokeShortcut, normalizeShortcut } from "./shortcuts.ts";
 interface ApplicationOptions {
 	platform: "win32" | "darwin" | "linux";
 	ports: DesktopHostPorts;
-	pi: PiAgentPort;
+	/** Compatibility injection for the default runtime. */
+	pi?: AgentRuntimePort;
+	/** Provider-aware runtime facade introduced in phase 4. */
+	runtimeService?: AgentRuntimePort;
+	runtimeProviderId?: string;
 	metadata: MetadataRepository;
 	secrets?: SecretStore;
 	sessionFiles?: SessionFileRepository;
@@ -157,6 +163,7 @@ function asRuntimeSnapshot(
 	runtimeId: string,
 	state: { status: RuntimeSnapshot["status"] } & Omit<Partial<RuntimeSnapshot>, "sessionId"> & {
 			sessionId?: string | null;
+			sessionRef?: string | null;
 		},
 ): RuntimeSnapshot {
 	return {
@@ -169,6 +176,9 @@ function asRuntimeSnapshot(
 		modelProvider: state.modelProvider ?? null,
 		modelId: state.modelId ?? null,
 		sessionPath: state.sessionPath ?? null,
+		runtimeSessionRef: state.sessionRef ?? state.sessionPath ?? null,
+		...(state.providerId ? { providerId: state.providerId } : {}),
+		...(state.capabilities ? { capabilities: state.capabilities } : {}),
 		messageCount: state.messageCount ?? 0,
 		lastError: state.lastError ?? null,
 	};
@@ -183,6 +193,11 @@ function conversationFromSummary(
 		id: existing?.id ?? summary.id,
 		projectId,
 		sessionPath: summary.sessionPath,
+		runtimeProviderId: existing?.runtimeProviderId ?? summary.runtimeProviderId ?? "pi",
+		runtimeSessionRef: existing?.runtimeSessionRef ?? summary.runtimeSessionRef ?? summary.sessionPath,
+		sessionCodecId: existing?.sessionCodecId ?? summary.sessionCodecId ?? "pi-jsonl",
+		sessionFormatVersion: existing?.sessionFormatVersion ?? summary.sessionFormatVersion ?? 3,
+		historyAccess: summary.historyAccess ?? "continue",
 		title: summary.title,
 		createdAt: existing?.createdAt ?? summary.createdAt,
 		updatedAt: summary.updatedAt,
@@ -222,19 +237,26 @@ export class DesktopApplication {
 	private models: ModelProfile[] = [];
 	private mcpServers: McpServerSnapshot[] = [];
 	private mcpProfiles: McpServerProfile[] = [];
+	private consentRequests: McpConsentRequest[] = [];
 	private commands: SkillCommand[] = [];
 	private activeProjectId: string | null = null;
 	private activeSessionId: string | null = null;
 	private draftSession: ConversationIndex | null = null;
 	private draftPromotion: Promise<void> | undefined;
 	private runtime: RuntimeSnapshot | null = null;
+	private readonly runtimePort: AgentRuntimePort;
 	private piUnsubscribe: (() => void) | undefined;
+	private mcpUnsubscribe: (() => void) | undefined;
 	private registeredShortcut: string | undefined;
 	private initialized = false;
 
 	constructor(options: ApplicationOptions) {
 		this.options = options;
-		this.piUnsubscribe = options.pi.subscribe((event) => this.handlePiEvent(event));
+		const runtimePort = options.runtimeService ?? options.pi;
+		if (!runtimePort) throw new Error("A runtime port is required");
+		this.runtimePort = runtimePort;
+		this.piUnsubscribe = this.runtimePort.subscribe((event) => this.handleAgentEvent(event));
+		this.mcpUnsubscribe = options.mcp?.subscribe((event) => this.handleMcpEvent(event));
 	}
 
 	subscribe(listener: (event: DesktopEvent) => void): () => void {
@@ -322,6 +344,7 @@ export class DesktopApplication {
 				profile: { ...server.profile, args: [...server.profile.args], env: { ...server.profile.env } },
 			})),
 			mcpTools: this.options.mcp?.listTools(this.activeProjectId ?? undefined) ?? [],
+			consentRequests: this.consentRequests.map((request) => ({ ...request })),
 			settings: { ...this.settings, skillDirectories: [...this.settings.skillDirectories] },
 			diagnostics: this.diagnostics.map((diagnostic) => ({ ...diagnostic })),
 		};
@@ -392,7 +415,7 @@ export class DesktopApplication {
 			case "agent.setModel":
 				return this.setModel(command.profileId);
 			case "agent.getCommands":
-				return { commands: await this.requirePi().getCommands() };
+				return { commands: await this.requireRuntime().getCommands() };
 			case "settings.get":
 				return this.settings;
 			case "settings.update":
@@ -431,6 +454,12 @@ export class DesktopApplication {
 				return this.testMcpConnection(command.serverId);
 			case "mcp.listTools":
 				return this.options.mcp?.listTools(command.projectId ?? this.activeProjectId ?? undefined) ?? [];
+			case "mcp.consent.respond":
+				if (!this.options.mcp?.respondConsent?.(command.requestId, command.approved, command.scope))
+					throw new DesktopError("NOT_FOUND", "Consent request is no longer pending", {
+						requestId: command.requestId,
+					});
+				return true;
 		}
 	}
 
@@ -446,6 +475,7 @@ export class DesktopApplication {
 
 	private async quit(): Promise<void> {
 		await this.options.mcp?.stopAll("application quit");
+		this.options.mcp?.dispose?.();
 		await this.stopRuntime("application quit");
 		await this.options.ports.shortcut.unregister(this.registeredShortcut ?? this.settings.invokeShortcut);
 		await this.options.ports.tray.destroy();
@@ -570,13 +600,13 @@ export class DesktopApplication {
 			await this.promoteDraftSession();
 		if (this.runtime?.projectId === projectId) {
 			if (this.runtime.isStreaming) await this.abort();
-			await this.requirePi().newSession();
+			await this.requireRuntime().newSession();
 			const defaultProfile = this.models.find(
 				(model) => model.id === this.settings.defaultModelProfileId && model.enabled,
 			);
-			if (defaultProfile) await this.requirePi().setModel(defaultProfile.providerId, defaultProfile.modelId);
-			await this.requirePi().setThinkingLevel(this.settings.defaultThinkingLevel);
-			const state = await this.requirePi().getState();
+			if (defaultProfile) await this.requireRuntime().setModel(defaultProfile.providerId, defaultProfile.modelId);
+			await this.requireRuntime().setThinkingLevel(this.settings.defaultThinkingLevel);
+			const state = await this.requireRuntime().getState();
 			this.messages.clear();
 			const session = this.buildSessionIndex(project, state, title);
 			this.draftSession = session;
@@ -585,39 +615,41 @@ export class DesktopApplication {
 				status: "ready",
 				...state,
 			});
-			if (session.title !== "New conversation") await this.requirePi().setSessionName(session.title);
+			if (session.title !== "New conversation") await this.requireRuntime().setSessionName(session.title);
 			await this.refreshRuntimeMessages();
 			this.emit({ type: "session.changed", ...this.runtime, sessionId: session.id, projectId });
 			return session;
 		}
 		await this.startRuntime(project);
-		const state = await this.requirePi().getState();
+		const state = await this.requireRuntime().getState();
 		const session = this.buildSessionIndex(project, state, title);
 		this.draftSession = session;
 		this.activeSessionId = session.id;
 		if (this.runtime) {
 			this.runtime = { ...this.runtime, sessionId: session.id, sessionPath: session.sessionPath };
 		}
-		if (session.title !== "New conversation") await this.requirePi().setSessionName(session.title);
+		if (session.title !== "New conversation") await this.requireRuntime().setSessionName(session.title);
 		return session;
 	}
 
 	private buildSessionIndex(
 		project: Project,
 		state: {
-			sessionPath: string | null;
+			sessionPath?: string | null;
+			sessionRef?: string | null;
 			thinkingLevel: ThinkingLevel;
 			modelProvider: string | null;
 			modelId: string | null;
 		},
 		title: string,
 	): ConversationIndex {
-		if (!state.sessionPath) throw new DesktopError("PROCESS_ERROR", "Pi did not create a session file");
+		const sessionPath = state.sessionPath ?? state.sessionRef;
+		if (!sessionPath) throw new DesktopError("PROCESS_ERROR", "Runtime did not create a session reference");
 		const timestamp = now();
 		return {
 			id: randomUUID(),
 			projectId: project.id,
-			sessionPath: state.sessionPath,
+			sessionPath,
 			title: title.trim() || "New conversation",
 			createdAt: timestamp,
 			updatedAt: timestamp,
@@ -640,11 +672,11 @@ export class DesktopApplication {
 		if (this.runtime?.projectId === project.id) {
 			if (this.activeSessionId === session.id) return session;
 			if (this.runtime.isStreaming) await this.abort();
-			await this.requirePi().switchSession(session.sessionPath);
+			await this.requireRuntime().switchSession(session.sessionPath);
 			this.draftSession = null;
 			this.activeSessionId = session.id;
 			this.messages.clear();
-			const state = await this.requirePi().getState();
+			const state = await this.requireRuntime().getState();
 			this.runtime = asRuntimeSnapshot(project.id, session.id, this.runtime.runtimeId, {
 				status: "ready",
 				...state,
@@ -669,7 +701,7 @@ export class DesktopApplication {
 		if (!nextTitle) throw new DesktopError("INVALID_ARGUMENT", "Session title cannot be empty");
 		const updated = { ...session, title: nextTitle, updatedAt: now() };
 		await this.options.metadata.saveConversation(updated);
-		if (sessionId === this.activeSessionId) await this.requirePi().setSessionName(nextTitle);
+		if (sessionId === this.activeSessionId) await this.requireRuntime().setSessionName(nextTitle);
 		this.conversations = await this.options.metadata.listConversations(updated.projectId);
 		return updated;
 	}
@@ -701,6 +733,15 @@ export class DesktopApplication {
 				await this.options.metadata.deleteConversation(conversation.id);
 		}
 		stored = await this.options.metadata.listConversations(projectId);
+		const indexedPaths = new Set(result.sessions.map((summary) => summary.sessionPath));
+		for (const conversation of stored) {
+			if (!indexedPaths.has(conversation.sessionPath) && conversation.historyAccess !== "missing")
+				await this.options.metadata.saveConversation({
+					...conversation,
+					historyAccess: "missing",
+					status: "error",
+				});
+		}
 		for (const summary of result.sessions) {
 			if (!summary.hasMessages) continue;
 			const existing = stored.find((candidate) => candidate.sessionPath === summary.sessionPath);
@@ -741,6 +782,15 @@ export class DesktopApplication {
 				await this.options.metadata.deleteConversation(conversation.id);
 		}
 		stored = await this.options.metadata.listConversations(project.id);
+		const indexedPaths = new Set(result.sessions.map((summary) => summary.sessionPath));
+		for (const conversation of stored) {
+			if (!indexedPaths.has(conversation.sessionPath) && conversation.historyAccess !== "missing")
+				await this.options.metadata.saveConversation({
+					...conversation,
+					historyAccess: "missing",
+					status: "error",
+				});
+		}
 		for (const summary of result.sessions) {
 			if (!summary.hasMessages) continue;
 			const existing = stored.find((candidate) => candidate.sessionPath === summary.sessionPath);
@@ -761,17 +811,28 @@ export class DesktopApplication {
 		this.runtime = asRuntimeSnapshot(project.id, sessionId, runtimeId, {
 			status: "starting",
 			sessionPath: session?.sessionPath ?? null,
+			providerId: this.options.runtimeProviderId ?? "pi",
 			thinkingLevel: session?.thinkingLevel ?? this.settings.defaultThinkingLevel,
 		});
 		this.emit({ type: "runtime.started", projectId: project.id, sessionId, runtimeId });
 		try {
-			const state = await this.requirePi().start(await this.buildRuntimeOptions(project, session, runtimeId));
+			const state = await this.requireRuntime().start(await this.buildRuntimeOptions(project, session, runtimeId));
 			if (!this.runtime || this.runtime.runtimeId !== runtimeId) return;
 			this.runtime = asRuntimeSnapshot(project.id, sessionId, runtimeId, { status: "ready", ...state });
 			await this.refreshRuntimeMessages();
 			await this.refreshCommands();
-			if (session && state.sessionPath && state.sessionPath !== session.sessionPath) {
-				const updated = { ...session, sessionPath: state.sessionPath, updatedAt: now() };
+			const sessionPath = state.sessionPath ?? state.sessionRef;
+			const providerId = state.providerId ?? this.options.runtimeProviderId ?? "pi";
+			if (session && (sessionPath !== session.sessionPath || session.runtimeProviderId !== providerId)) {
+				const updated = {
+					...session,
+					...(sessionPath ? { sessionPath } : {}),
+					runtimeProviderId: providerId,
+					runtimeSessionRef: state.sessionRef ?? sessionPath ?? session.runtimeSessionRef ?? null,
+					sessionCodecId: session.sessionCodecId ?? (providerId === "pi" ? "pi-jsonl" : undefined),
+					sessionFormatVersion: session.sessionFormatVersion ?? (providerId === "pi" ? 3 : null),
+					updatedAt: now(),
+				};
 				if (this.draftSession?.id === session.id) this.draftSession = updated;
 				else {
 					await this.options.metadata.saveConversation(updated);
@@ -798,7 +859,7 @@ export class DesktopApplication {
 	}
 
 	private async buildRuntimeOptions(project: Project, session: ConversationIndex | undefined, runtimeId: string) {
-		const models: PiRuntimeModel[] = [];
+		const models: RuntimeModel[] = [];
 		const env: Record<string, string> = {};
 		const sensitiveValues: string[] = [];
 		for (const profile of this.models.filter((candidate) => candidate.enabled)) {
@@ -836,6 +897,7 @@ export class DesktopApplication {
 		}
 		return {
 			cwd: project.rootPath,
+			sessionRef: session?.sessionPath,
 			sessionPath: session?.sessionPath,
 			sessionDirectory: this.sessionDirectory(project),
 			agentDirectory: this.agentDirectory(project),
@@ -854,6 +916,11 @@ export class DesktopApplication {
 				(defaultProfile ? { providerId: defaultProfile.providerId, modelId: defaultProfile.modelId } : undefined),
 			thinkingLevel: session?.thinkingLevel ?? this.settings.defaultThinkingLevel,
 			runtimeId,
+			providerId: this.options.runtimeProviderId ?? "pi",
+			tools: this.options.mcp?.listToolDefinitions?.(
+				this.activeProjectId ?? undefined,
+				project.trustState === "trusted",
+			),
 		};
 	}
 
@@ -862,7 +929,7 @@ export class DesktopApplication {
 		const previous = this.runtime;
 		this.runtime = null;
 		try {
-			await this.options.pi.stop();
+			await this.runtimePort.stop();
 		} finally {
 			this.emit({
 				type: "runtime.stopped",
@@ -887,8 +954,8 @@ export class DesktopApplication {
 		return { ...this.runtime };
 	}
 
-	private requirePi(): PiAgentPort {
-		return this.options.pi;
+	private requireRuntime(): AgentRuntimePort {
+		return this.runtimePort;
 	}
 
 	private activeConversation(): ConversationIndex | undefined {
@@ -920,11 +987,11 @@ export class DesktopApplication {
 				await this.options.metadata.saveConversation(updated);
 				this.conversations = await this.options.metadata.listConversations(updated.projectId);
 			}
-			await this.requirePi().setSessionName(updated.title);
+			await this.requireRuntime().setSessionName(updated.title);
 		}
-		if (queueMode === "steer") await this.requirePi().steer(text);
-		else if (queueMode === "followUp") await this.requirePi().followUp(text);
-		else await this.requirePi().prompt(text);
+		if (queueMode === "steer") await this.requireRuntime().steer(text);
+		else if (queueMode === "followUp") await this.requireRuntime().followUp(text);
+		else await this.requireRuntime().prompt(text);
 		return null;
 	}
 
@@ -941,12 +1008,12 @@ export class DesktopApplication {
 
 	private async abort(): Promise<null> {
 		if (!this.runtime) throw new DesktopError("NOT_READY", "No active Pi runtime");
-		await this.requirePi().abort();
+		await this.requireRuntime().abort();
 		return null;
 	}
 
 	private async setThinkingLevel(level: ThinkingLevel): Promise<null> {
-		await this.requirePi().setThinkingLevel(level);
+		await this.requireRuntime().setThinkingLevel(level);
 		if (this.runtime) this.runtime.thinkingLevel = level;
 		await this.updateActiveConversation({ thinkingLevel: level });
 		return null;
@@ -955,7 +1022,7 @@ export class DesktopApplication {
 	private async setModel(profileId: string): Promise<null> {
 		const profile = this.models.find((candidate) => candidate.id === profileId && candidate.enabled);
 		if (!profile) throw new DesktopError("NOT_FOUND", "Enabled model profile not found", { profileId });
-		await this.requirePi().setModel(profile.providerId, profile.modelId);
+		await this.requireRuntime().setModel(profile.providerId, profile.modelId);
 		if (this.runtime) {
 			this.runtime.modelProvider = profile.providerId;
 			this.runtime.modelId = profile.modelId;
@@ -1234,7 +1301,7 @@ export class DesktopApplication {
 	private async refreshRuntimeMessages(): Promise<void> {
 		const previousMessages = collapseMessages([...this.messages.values()]);
 		const previous = new Map(previousMessages.map((message) => [message.id, message]));
-		const messages = collapseMessages(await this.requirePi().getMessages());
+		const messages = collapseMessages(await this.requireRuntime().getMessages());
 		this.messages.clear();
 		const consumedPreviousIds = new Set<string>();
 		for (const message of messages) {
@@ -1282,7 +1349,7 @@ export class DesktopApplication {
 	}
 
 	private async refreshCommands(): Promise<void> {
-		this.commands = (await this.requirePi().getCommands()).map((command) => ({ ...command }));
+		this.commands = (await this.requireRuntime().getCommands()).map((command) => ({ ...command }));
 		if (this.runtime) this.emit({ type: "skills.changed", ...this.runtime, commands: this.commands });
 	}
 
@@ -1335,7 +1402,7 @@ export class DesktopApplication {
 		}
 	}
 
-	private handlePiEvent(event: PiAgentEvent): void {
+	private handleAgentEvent(event: AgentEvent): void {
 		if (!this.runtime || event.runtimeId !== this.runtime.runtimeId) return;
 		const identity = {
 			projectId: this.runtime.projectId,
@@ -1485,6 +1552,39 @@ export class DesktopApplication {
 		}
 	}
 
+	private handleMcpEvent(event: McpPortEvent): void {
+		this.mcpServers = this.options.mcp?.list() ?? this.mcpServers;
+		if (event.snapshot) {
+			const publicSnapshot = publicMcpSnapshot(event.snapshot);
+			this.emit({ type: "mcp.serverChanged", server: publicSnapshot });
+		} else if (event.serverId) {
+			const snapshot = this.mcpServers.find((candidate) => candidate.profile.id === event.serverId);
+			if (snapshot) this.emit({ type: "mcp.serverChanged", server: publicMcpSnapshot(snapshot) });
+		}
+		if (event.tools) {
+			const tools = event.tools.map((tool) => ({ ...tool, inputSchema: { ...tool.inputSchema } }));
+			this.emit({ type: "mcp.toolsChanged", tools });
+			const project = this.projects.find((candidate) => candidate.id === this.activeProjectId);
+			const definitions = this.options.mcp?.listToolDefinitions?.(
+				this.activeProjectId ?? undefined,
+				project?.trustState === "trusted",
+			);
+			if (definitions && this.runtimePort.setTools) void this.runtimePort.setTools(definitions);
+		}
+		if (event.type === "server.error" && event.error) this.recordDiagnostic("error", "mcp", event.error);
+		if (event.type === "consent.required" && event.request) {
+			this.consentRequests = [
+				...this.consentRequests.filter((request) => request.requestId !== event.request?.requestId),
+				event.request,
+			];
+			this.emit({ type: "mcp.consentRequired", request: { ...event.request } });
+		}
+		if (event.type === "consent.resolved" && event.requestId) {
+			this.consentRequests = this.consentRequests.filter((request) => request.requestId !== event.requestId);
+			this.emit({ type: "mcp.consentResolved", requestId: event.requestId, approved: event.approved === true });
+		}
+	}
+
 	private applyMessageDelta(messageId: string, partType: "text" | "thinking", delta: string): void {
 		const message = this.messages.get(messageId);
 		if (!message) return;
@@ -1553,5 +1653,7 @@ export class DesktopApplication {
 	dispose(): void {
 		this.piUnsubscribe?.();
 		this.piUnsubscribe = undefined;
+		this.mcpUnsubscribe?.();
+		this.mcpUnsubscribe = undefined;
 	}
 }

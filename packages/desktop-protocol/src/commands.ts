@@ -72,7 +72,8 @@ export type DesktopMcpCommand =
 	| { type: "mcp.delete"; serverId: string }
 	| { type: "mcp.setEnabled"; serverId: string; enabled: boolean }
 	| { type: "mcp.testConnection"; serverId: string }
-	| { type: "mcp.listTools"; projectId?: string };
+	| { type: "mcp.listTools"; projectId?: string }
+	| { type: "mcp.consent.respond"; requestId: string; approved: boolean; scope?: "once" | "session" | "project" };
 
 export type DesktopCommand = DesktopCommandBase | DesktopMcpCommand;
 
@@ -103,5 +104,6 @@ export type DesktopCommandResult =
 	| McpServerSnapshot[]
 	| McpServerSnapshot
 	| McpTool[]
+	| boolean
 	| null
 	| { commands: Array<{ name: string; description?: string; source: string }> };

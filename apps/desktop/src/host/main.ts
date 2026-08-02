@@ -1,12 +1,16 @@
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { ServerResponse } from "node:http";
 import { dirname, join, normalize, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DesktopApplication, MemorySecretStore } from "@earendil-works/pi-desktop-core";
-import { McpManager } from "@earendil-works/pi-desktop-mcp";
-import { RecoveringPiAgentPort, RpcPiAgentPort } from "@earendil-works/pi-desktop-pi-bridge";
-import type { DesktopCommand } from "@earendil-works/pi-desktop-protocol";
-import { parseDesktopRequest } from "@earendil-works/pi-desktop-protocol";
+import {
+	DesktopApplication,
+	MemorySecretStore,
+	RuntimeProviderRegistry,
+	RuntimeService,
+} from "@earendil-works/pi-desktop-core";
+import { ConsentBroker, McpManager } from "@earendil-works/pi-desktop-mcp";
+import { createPiRuntimeProvider } from "@earendil-works/pi-desktop-pi-bridge";
 import {
 	backupBeforeMigration,
 	desktopDataDirectory,
@@ -17,6 +21,7 @@ import {
 import { exportDiagnostics } from "./diagnostics.ts";
 import { createElectronDesktopPorts } from "./electron-ports.ts";
 import { FileSingleInstancePort } from "./file-single-instance.ts";
+import { createDesktopHostHttpServer } from "./http-gateway.ts";
 import { ConsoleDesktopLogger } from "./logger.ts";
 import { FetchModelConnectionTester, NativeFolderPickerPort, PlatformSecretStore } from "./platform-services.ts";
 import { MemoryShortcutPort, MemoryTrayPort, MemoryWindowPort } from "./ports.ts";
@@ -28,12 +33,6 @@ const lucideDirectory =
 const port = Number(process.env.PI_DESKTOP_PORT ?? 4317);
 const webSearchExtensionPath =
 	process.env.PI_DESKTOP_WEB_SEARCH_EXTENSION ?? join(here, "..", "extensions", "web-search.ts");
-
-async function readJson(request: IncomingMessage): Promise<unknown> {
-	const chunks: Buffer[] = [];
-	for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-	return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-}
 
 function sendJson(response: ServerResponse, statusCode: number, value: unknown): void {
 	response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -97,10 +96,21 @@ async function main(): Promise<void> {
 		platform === "win32" || platform === "darwin"
 			? new PlatformSecretStore(dataDirectory, process.platform)
 			: new MemorySecretStore();
+	const consent = new ConsentBroker({ timeoutMs: 30_000 });
 	const mcp = new McpManager({
 		secrets,
-		consent: async () => false,
+		consent: (request) => consent.request(request),
+		respondConsent: (requestId, approved, scope) => consent.respond(requestId, approved, scope),
+		consentBroker: consent,
 	});
+	const runtimeRegistry = new RuntimeProviderRegistry();
+	runtimeRegistry.register(
+		createPiRuntimeProvider({
+			rpc: process.env.PI_DESKTOP_RPC_ENTRY ? { args: [process.env.PI_DESKTOP_RPC_ENTRY] } : undefined,
+		}),
+		{ isDefault: true },
+	);
+	const runtimeService = new RuntimeService(runtimeRegistry);
 	const app = new DesktopApplication({
 		platform,
 		ports: {
@@ -112,11 +122,8 @@ async function main(): Promise<void> {
 			diagnosticsExport: (diagnostics) =>
 				exportDiagnostics(join(dataDirectory, "diagnostics"), diagnostics, { platform, node: process.version }),
 		},
-		pi: new RecoveringPiAgentPort(
-			new RpcPiAgentPort(
-				process.env.PI_DESKTOP_RPC_ENTRY ? { args: [process.env.PI_DESKTOP_RPC_ENTRY] } : undefined,
-			),
-		),
+		runtimeService,
+		runtimeProviderId: "pi",
 		metadata,
 		secrets,
 		sessionFiles: new PiSessionFileRepository(),
@@ -128,59 +135,20 @@ async function main(): Promise<void> {
 		webSearchExtensionPath,
 	});
 	await app.initialize();
-	const eventClients = new Set<ServerResponse>();
-	const unsubscribeEvents = app.subscribe((event) => {
-		const payload = `event: desktop\ndata: ${JSON.stringify(event)}\n\n`;
-		for (const client of eventClients) {
-			try {
-				client.write(payload);
-			} catch {
-				eventClients.delete(client);
-			}
-		}
+	const hostToken = process.env.PI_DESKTOP_HOST_TOKEN ?? randomBytes(32).toString("hex");
+	const http = createDesktopHostHttpServer({
+		app,
+		hostToken,
+		port,
+		staticHandler: (pathname, response) => serveRenderer(pathname, response),
 	});
-	const server = createServer(async (request, response) => {
-		try {
-			const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
-			if (request.method === "GET" && pathname === "/api/state") {
-				sendJson(response, 200, app.getState());
-				return;
-			}
-			if (request.method === "GET" && pathname === "/api/events") {
-				response.writeHead(200, {
-					"content-type": "text/event-stream; charset=utf-8",
-					"cache-control": "no-cache, no-transform",
-					connection: "keep-alive",
-				});
-				response.write(": connected\n\n");
-				eventClients.add(response);
-				request.on("close", () => eventClients.delete(response));
-				return;
-			}
-			if (request.method === "POST" && pathname === "/api/command") {
-				const requestValue = parseDesktopRequest(await readJson(request));
-				sendJson(response, 200, await app.dispatch(requestValue.command as DesktopCommand, requestValue.requestId));
-				return;
-			}
-			if (request.method === "GET") {
-				await serveRenderer(pathname, response);
-				return;
-			}
-			sendJson(response, 405, { error: "Method not allowed" });
-		} catch (error: unknown) {
-			sendJson(response, 400, { error: error instanceof Error ? error.message : String(error) });
-		}
-	});
-	server.listen(port, "127.0.0.1", () => console.log(`Pi desktop host listening at http://127.0.0.1:${port}`));
+	http.server.listen(port, "127.0.0.1", () => console.log(`Pi desktop host listening at http://127.0.0.1:${port}`));
 	let shuttingDown = false;
 	const shutdown = async (): Promise<void> => {
 		if (shuttingDown) return;
 		shuttingDown = true;
-		unsubscribeEvents();
-		for (const client of eventClients) client.end();
-		eventClients.clear();
 		await app.dispatch({ type: "app.quit" });
-		await new Promise<void>((resolve) => server.close(() => resolve()));
+		await http.close();
 		electronPorts?.dispose();
 	};
 	process.once("SIGINT", () => void shutdown());

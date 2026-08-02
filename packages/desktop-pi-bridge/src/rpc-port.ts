@@ -10,6 +10,7 @@ import type {
 	PiAgentState,
 	PiCommandInfo,
 	PiRuntimeOptions,
+	RuntimeToolDefinition,
 } from "@earendil-works/pi-desktop-core";
 import type { DesktopMessage, ThinkingLevel } from "@earendil-works/pi-desktop-protocol";
 import { DesktopError } from "@earendil-works/pi-desktop-protocol";
@@ -95,6 +96,7 @@ export class RpcPiAgentPort implements PiAgentPort {
 		modelProvider: null,
 		modelId: null,
 		sessionPath: null,
+		sessionRef: null,
 		sessionId: null,
 		messageCount: 0,
 	};
@@ -103,6 +105,7 @@ export class RpcPiAgentPort implements PiAgentPort {
 	private sensitiveValues: string[] = [];
 	private runtimeOptions: PiRuntimeOptions | undefined;
 	private streamingMessageId: string | undefined;
+	private tools: RuntimeToolDefinition[] = [];
 
 	constructor(options: RpcPiAgentPortOptions = {}) {
 		this.options = options;
@@ -111,6 +114,7 @@ export class RpcPiAgentPort implements PiAgentPort {
 	async start(options: PiRuntimeOptions): Promise<PiAgentState> {
 		await this.stop();
 		this.runtimeOptions = options;
+		this.tools = [...(options.tools ?? [])];
 		const modelConfig = buildModelsJson(options);
 		this.sensitiveValues = modelConfig.secrets;
 		await mkdir(options.agentDirectory, { recursive: true, mode: 0o700 });
@@ -122,7 +126,8 @@ export class RpcPiAgentPort implements PiAgentPort {
 		const command = this.options.command ?? process.execPath;
 		const args = [...(this.options.args ?? [resolveDefaultRpcEntry()])];
 		args.push("--session-dir", options.sessionDirectory);
-		if (options.sessionPath && existsSync(options.sessionPath)) args.push("--session", options.sessionPath);
+		const sessionPath = options.sessionPath ?? options.sessionRef ?? undefined;
+		if (sessionPath && existsSync(sessionPath)) args.push("--session", sessionPath);
 		args.push(options.projectTrusted ? "--approve" : "--no-approve");
 		if (options.globalSystemPrompt?.trim()) args.push("--append-system-prompt", options.globalSystemPrompt);
 		for (const directory of options.skillDirectories) args.push("--skill", directory);
@@ -244,6 +249,10 @@ export class RpcPiAgentPort implements PiAgentPort {
 		await this.send({ type: "set_model", provider, modelId });
 		this.state.modelProvider = provider;
 		this.state.modelId = modelId;
+	}
+
+	setTools(tools: readonly RuntimeToolDefinition[]): void {
+		this.tools = tools.map((tool) => ({ ...tool }));
 	}
 
 	subscribe(listener: (event: PiAgentEvent) => void): () => void {

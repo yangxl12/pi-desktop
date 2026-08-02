@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import type { RuntimeToolDefinition } from "@earendil-works/pi-desktop-core";
+import type { ConsentBroker } from "./policy.ts";
 import { callMcpTool, createMcpTransport, createTimedSignal, type McpTransportClient } from "./transport.ts";
 import type {
 	McpConsent,
@@ -20,6 +22,8 @@ interface Connection {
 export interface McpManagerOptions {
 	secrets?: McpSecretResolver;
 	consent?: McpConsent;
+	respondConsent?: (requestId: string, approved: boolean, scope?: "once" | "session" | "project") => boolean;
+	consentBroker?: ConsentBroker;
 }
 
 function toolList(result: unknown, profile: McpServerProfile): McpTool[] {
@@ -61,9 +65,27 @@ export class McpManager {
 	private readonly profiles = new Map<string, McpServerProfile>();
 	private readonly listeners = new Set<McpEventListener>();
 	private readonly options: McpManagerOptions;
+	private readonly consentUnsubscribe: (() => void) | undefined;
 
 	constructor(options: McpManagerOptions = {}) {
 		this.options = options;
+		this.consentUnsubscribe = options.consentBroker?.subscribe((event) => {
+			if (event.type === "consent.required")
+				this.emit({
+					type: "consent.required",
+					serverId: event.request.serverId,
+					createdAt: new Date().toISOString(),
+					request: event.request,
+				});
+			else
+				this.emit({
+					type: "consent.resolved",
+					serverId: "",
+					createdAt: new Date().toISOString(),
+					requestId: event.requestId,
+					approved: event.approved,
+				});
+		});
 	}
 
 	subscribe(listener: McpEventListener): () => void {
@@ -184,6 +206,11 @@ export class McpManager {
 		await Promise.all([...this.connections.keys()].map((serverId) => this.stop(serverId, reason)));
 	}
 
+	dispose(): void {
+		this.consentUnsubscribe?.();
+		this.listeners.clear();
+	}
+
 	listTools(projectId?: string): McpTool[] {
 		return [...this.connections.values()]
 			.flatMap((connection) => connection.tools)
@@ -192,6 +219,20 @@ export class McpManager {
 				return projectScope === null || projectScope === undefined || projectScope === projectId;
 			})
 			.map((tool) => ({ ...tool, inputSchema: { ...tool.inputSchema } }));
+	}
+
+	listToolDefinitions(projectId?: string, trusted = false): RuntimeToolDefinition[] {
+		return this.listTools(projectId).map((tool) => ({
+			name: tool.namespacedName.replace(/[^a-zA-Z0-9_-]/g, "_"),
+			description: tool.description ?? `MCP tool ${tool.namespacedName}`,
+			parameters: { ...tool.inputSchema },
+			call: (argumentsValue, signal) =>
+				this.callTool(tool.namespacedName, argumentsValue, { projectId: projectId ?? null, trusted, signal }),
+		}));
+	}
+
+	respondConsent(requestId: string, approved: boolean, scope: "once" | "session" | "project" = "once"): boolean {
+		return this.options.respondConsent?.(requestId, approved, scope) ?? false;
 	}
 
 	async test(profile: McpServerProfile): Promise<McpServerSnapshot> {
@@ -213,10 +254,13 @@ export class McpManager {
 		const connection = this.connections.get(tool.serverId);
 		if (!profile || !connection || connection.snapshot.status !== "ready")
 			throw new Error(`MCP server is not ready: ${tool.serverId}`);
+		const requestId = randomUUID();
 		if (
 			!context.trusted &&
 			!(
 				(await this.options.consent?.({
+					requestId,
+					argumentsSummary: Object.keys(argumentsValue).sort().join(","),
 					serverId: tool.serverId,
 					toolName: tool.name,
 					projectId: context.projectId,
@@ -225,7 +269,6 @@ export class McpManager {
 		) {
 			throw new Error("MCP tool invocation requires trusted project or explicit consent");
 		}
-		const requestId = randomUUID();
 		this.emit({
 			type: "tool.started",
 			serverId: tool.serverId,

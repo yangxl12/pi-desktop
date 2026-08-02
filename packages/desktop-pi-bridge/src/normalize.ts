@@ -1,4 +1,5 @@
 import type { PiAgentEventPayload, PiAgentState, PiCommandInfo } from "@earendil-works/pi-desktop-core";
+import { DEFAULT_RUNTIME_CAPABILITIES } from "@earendil-works/pi-desktop-core";
 import type { DesktopMessage, MessagePart, ThinkingLevel } from "@earendil-works/pi-desktop-protocol";
 
 interface RawRecord {
@@ -109,8 +110,10 @@ export function normalizeState(value: unknown): PiAgentState {
 		modelProvider: stringValue(model?.provider) ?? null,
 		modelId: stringValue(model?.id) ?? null,
 		sessionPath: stringValue(state.sessionFile) ?? null,
+		sessionRef: stringValue(state.sessionFile) ?? null,
 		sessionId: stringValue(state.sessionId) ?? null,
 		messageCount: numberValue(state.messageCount) ?? 0,
+		capabilities: { ...DEFAULT_RUNTIME_CAPABILITIES },
 	};
 }
 

@@ -25,6 +25,11 @@ interface ConversationRow {
 	id: string;
 	project_id: string;
 	session_path: string;
+	runtime_provider_id: string | null;
+	runtime_session_ref: string | null;
+	session_codec_id: string | null;
+	session_format_version: number | null;
+	history_access: ConversationIndex["historyAccess"] | null;
 	title: string;
 	created_at: string;
 	updated_at: string;
@@ -69,6 +74,11 @@ function conversationFromRow(row: ConversationRow): ConversationIndex {
 		id: row.id,
 		projectId: row.project_id,
 		sessionPath: row.session_path,
+		runtimeProviderId: row.runtime_provider_id ?? "pi",
+		runtimeSessionRef: row.runtime_session_ref ?? row.session_path,
+		sessionCodecId: row.session_codec_id ?? "pi-jsonl",
+		sessionFormatVersion: row.session_format_version,
+		historyAccess: row.history_access ?? "continue",
 		title: row.title,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
@@ -125,6 +135,11 @@ export class SqliteMetadataRepository implements MetadataRepository {
 					id TEXT PRIMARY KEY,
 					project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
 					session_path TEXT NOT NULL UNIQUE,
+					runtime_provider_id TEXT,
+					runtime_session_ref TEXT,
+					session_codec_id TEXT,
+					session_format_version INTEGER,
+					history_access TEXT,
 					title TEXT NOT NULL,
 					created_at TEXT NOT NULL,
 					updated_at TEXT NOT NULL,
@@ -157,9 +172,27 @@ export class SqliteMetadataRepository implements MetadataRepository {
 					value_json TEXT NOT NULL
 				);
 			`);
+			const conversationColumns = new Set(
+				(this.database.prepare("PRAGMA table_info(conversations)").all() as Array<{ name: string }>).map(
+					(column) => column.name,
+				),
+			);
+			for (const [name, definition] of [
+				["runtime_provider_id", "TEXT"],
+				["runtime_session_ref", "TEXT"],
+				["session_codec_id", "TEXT"],
+				["session_format_version", "INTEGER"],
+				["history_access", "TEXT"],
+			] as const) {
+				if (!conversationColumns.has(name))
+					this.database.exec(`ALTER TABLE conversations ADD COLUMN ${name} ${definition}`);
+			}
 			this.database
 				.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)")
 				.run(1, new Date().toISOString());
+			this.database
+				.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+				.run(2, new Date().toISOString());
 			this.database.exec("COMMIT");
 		} catch (error: unknown) {
 			this.database.exec("ROLLBACK");
@@ -233,11 +266,17 @@ export class SqliteMetadataRepository implements MetadataRepository {
 		this.database
 			.prepare(`
 				INSERT INTO conversations(
-					id, project_id, session_path, title, created_at, updated_at,
+					id, project_id, session_path, runtime_provider_id, runtime_session_ref, session_codec_id,
+					session_format_version, history_access, title, created_at, updated_at,
 					model_provider, model_id, thinking_level, leaf_id, status
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(id) DO UPDATE SET
 					session_path = excluded.session_path,
+					runtime_provider_id = excluded.runtime_provider_id,
+					runtime_session_ref = excluded.runtime_session_ref,
+					session_codec_id = excluded.session_codec_id,
+					session_format_version = excluded.session_format_version,
+					history_access = excluded.history_access,
 					title = excluded.title,
 					updated_at = excluded.updated_at,
 					model_provider = excluded.model_provider,
@@ -250,6 +289,11 @@ export class SqliteMetadataRepository implements MetadataRepository {
 				conversation.id,
 				conversation.projectId,
 				conversation.sessionPath,
+				conversation.runtimeProviderId ?? "pi",
+				conversation.runtimeSessionRef ?? conversation.sessionPath,
+				conversation.sessionCodecId ?? "pi-jsonl",
+				conversation.sessionFormatVersion ?? 3,
+				conversation.historyAccess ?? "continue",
 				conversation.title,
 				conversation.createdAt,
 				conversation.updatedAt,

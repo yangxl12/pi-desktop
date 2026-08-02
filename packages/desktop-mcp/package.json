@@ -23,7 +23,9 @@
 	"license": "MIT",
 	"engines": { "node": ">=22.19.0" },
 	"dependencies": {
-		"@modelcontextprotocol/sdk": "1.30.0"
+		"@modelcontextprotocol/sdk": "1.30.0",
+		"@earendil-works/pi-desktop-core": "0.1.0",
+		"@earendil-works/pi-desktop-protocol": "0.1.0"
 	},
 	"devDependencies": {
 		"shx": "0.4.0",

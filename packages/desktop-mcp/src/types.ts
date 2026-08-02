@@ -1,51 +1,19 @@
-export type McpTransport = "stdio" | "http";
+import type { McpConsentRequest, McpServerSnapshot, McpTool } from "@earendil-works/pi-desktop-protocol";
 
-export interface McpServerProfile {
-	id: string;
-	name: string;
-	transport: McpTransport;
-	command: string | null;
-	args: string[];
-	env: Record<string, string>;
-	url: string | null;
-	credentialRef: string | null;
-	namespace: string;
-	enabled: boolean;
-	timeoutMs: number;
-	maxOutputBytes: number;
-	projectId: string | null;
-}
-
-export type McpServerDraft = Omit<McpServerProfile, "id">;
-export type McpServerPatch = Partial<McpServerDraft>;
-
-export type McpStatus = "stopped" | "starting" | "ready" | "error";
-
-export interface McpServerSnapshot {
-	profile: McpServerProfile;
-	status: McpStatus;
-	toolCount: number;
-	lastError: string | null;
-	startedAt: string | null;
-}
-
-export interface McpTool {
-	name: string;
-	description?: string;
-	inputSchema: Record<string, unknown>;
-	serverId: string;
-	namespacedName: string;
-}
+export type {
+	McpConsentRequest,
+	McpServerDraft,
+	McpServerPatch,
+	McpServerProfile,
+	McpServerSnapshot,
+	McpStatus,
+	McpTool,
+	McpTransport,
+} from "@earendil-works/pi-desktop-protocol";
 
 export interface McpToolResult {
 	content: Array<Record<string, unknown>>;
 	isError?: boolean;
-}
-
-export interface McpConsentRequest {
-	serverId: string;
-	toolName: string;
-	projectId: string | null;
 }
 
 export type McpConsent = (request: McpConsentRequest) => Promise<boolean>;
@@ -65,6 +33,8 @@ export type McpEvent =
 	| (McpEventBase & { type: "server.error"; error: string })
 	| (McpEventBase & { type: "tools.changed"; tools: McpTool[] })
 	| (McpEventBase & { type: "tool.started"; toolName: string; requestId: string })
-	| (McpEventBase & { type: "tool.finished"; toolName: string; requestId: string; failed: boolean });
+	| (McpEventBase & { type: "tool.finished"; toolName: string; requestId: string; failed: boolean })
+	| (McpEventBase & { type: "consent.required"; request: McpConsentRequest })
+	| (McpEventBase & { type: "consent.resolved"; requestId: string; approved: boolean });
 
 export type McpEventListener = (event: McpEvent) => void;

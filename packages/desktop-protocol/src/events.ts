@@ -1,6 +1,7 @@
 import type {
 	DesktopMessage,
 	Diagnostic,
+	McpConsentRequest,
 	McpServerSnapshot,
 	McpTool,
 	RuntimeIdentity,
@@ -26,6 +27,8 @@ export type DesktopEvent =
 	| ({ type: "skills.changed"; commands: SkillCommand[] } & RuntimeIdentity)
 	| { type: "mcp.serverChanged"; server: McpServerSnapshot }
 	| { type: "mcp.toolsChanged"; tools: McpTool[] }
+	| { type: "mcp.consentRequired"; request: McpConsentRequest }
+	| { type: "mcp.consentResolved"; requestId: string; approved: boolean }
 	| ({ type: "diagnostic"; diagnostic: Diagnostic } & RuntimeIdentity);
 
 export type DesktopEventListener = (event: DesktopEvent) => void;

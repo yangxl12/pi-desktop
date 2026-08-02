@@ -4,6 +4,8 @@ import type {
 	PiAgentState,
 	PiCommandInfo,
 	PiRuntimeOptions,
+	RuntimeState,
+	RuntimeToolDefinition,
 } from "@earendil-works/pi-desktop-core";
 import type { DesktopMessage, ThinkingLevel } from "@earendil-works/pi-desktop-protocol";
 
@@ -75,6 +77,9 @@ export class RecoveringPiAgentPort implements PiAgentPort {
 	setModel(provider: string, modelId: string): Promise<void> {
 		return this.inner.setModel(provider, modelId);
 	}
+	setTools(tools: readonly RuntimeToolDefinition[]): Promise<void> | void {
+		return this.inner.setTools?.(tools);
+	}
 
 	async getState(): Promise<PiAgentState> {
 		const state = await this.inner.getState();
@@ -89,7 +94,10 @@ export class RecoveringPiAgentPort implements PiAgentPort {
 	}
 
 	async switchSession(sessionPath: string): Promise<PiAgentState> {
-		if (this.runtimeOptions) this.runtimeOptions.sessionPath = sessionPath;
+		if (this.runtimeOptions) {
+			this.runtimeOptions.sessionPath = sessionPath;
+			this.runtimeOptions.sessionRef = sessionPath;
+		}
 		const state = await this.inner.switchSession(sessionPath);
 		this.rememberSession(state);
 		return state;
@@ -141,8 +149,12 @@ export class RecoveringPiAgentPort implements PiAgentPort {
 		}
 	}
 
-	private rememberSession(state: PiAgentState): void {
-		if (this.runtimeOptions && state.sessionPath) this.runtimeOptions.sessionPath = state.sessionPath;
+	private rememberSession(state: RuntimeState): void {
+		const sessionRef = state.sessionRef ?? state.sessionPath;
+		if (this.runtimeOptions && sessionRef) {
+			this.runtimeOptions.sessionPath = state.sessionPath ?? sessionRef;
+			this.runtimeOptions.sessionRef = sessionRef;
+		}
 	}
 
 	private emit(event: PiAgentEvent): void {

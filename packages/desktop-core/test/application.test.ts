@@ -2,8 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { FakePiAgentPort } from "../../desktop-pi-bridge/src/fake-port.ts";
-import { DesktopApplication, MemoryMetadataRepository } from "../src/index.ts";
+import { DesktopApplication, FakeAgentRuntime, MemoryMetadataRepository } from "../src/index.ts";
 import type { DesktopHostPorts } from "../src/ports.ts";
 
 class TestWindow {
@@ -104,7 +103,7 @@ describe("desktop application", () => {
 		const app = new DesktopApplication({
 			platform: "win32",
 			ports: ports(),
-			pi: new FakePiAgentPort({ response: "ok" }),
+			pi: new FakeAgentRuntime({ response: "ok" }),
 			metadata: new MemoryMetadataRepository(),
 		});
 		await app.initialize();
@@ -128,7 +127,7 @@ describe("desktop application", () => {
 		const app = new DesktopApplication({
 			platform: "win32",
 			ports: { ...ports(), shortcut },
-			pi: new FakePiAgentPort(),
+			pi: new FakeAgentRuntime(),
 			metadata: new MemoryMetadataRepository(),
 		});
 		await app.initialize();
@@ -143,7 +142,7 @@ describe("desktop application", () => {
 		const app = new DesktopApplication({
 			platform: "win32",
 			ports: ports(),
-			pi: new FakePiAgentPort({ response: "completed" }),
+			pi: new FakeAgentRuntime({ response: "completed" }),
 			metadata: new MemoryMetadataRepository(),
 		});
 		await app.initialize();
@@ -160,7 +159,7 @@ describe("desktop application", () => {
 		const app = new DesktopApplication({
 			platform: "win32",
 			ports: ports(),
-			pi: new FakePiAgentPort({ response: "completed" }),
+			pi: new FakeAgentRuntime({ response: "completed" }),
 			metadata: new MemoryMetadataRepository(),
 			sessionFiles: new DelayedSessionFiles(),
 		});
@@ -176,7 +175,7 @@ describe("desktop application", () => {
 		const app = new DesktopApplication({
 			platform: "win32",
 			ports: { ...ports(), shortcut, window },
-			pi: new FakePiAgentPort(),
+			pi: new FakeAgentRuntime(),
 			metadata: new MemoryMetadataRepository(),
 		});
 		await app.initialize();
@@ -189,7 +188,7 @@ describe("desktop application", () => {
 		const app = new DesktopApplication({
 			platform: "win32",
 			ports: { ...ports(), window },
-			pi: new FakePiAgentPort(),
+			pi: new FakeAgentRuntime(),
 			metadata: new MemoryMetadataRepository(),
 		});
 		await app.initialize();
@@ -216,7 +215,7 @@ describe("desktop application", () => {
 		const app = new DesktopApplication({
 			platform: "win32",
 			ports: ports(),
-			pi: new FakePiAgentPort(),
+			pi: new FakeAgentRuntime(),
 			metadata,
 		});
 		await app.initialize();
