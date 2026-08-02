@@ -146,6 +146,12 @@ export function isDesktopCommand(value: unknown): value is DesktopCommand {
 	if (type === "agent.setModel") return isNonEmptyString(value.profileId);
 	if (type === "settings.update") return isRecord(value.patch);
 	if (type === "settings.reset") return isNonEmptyString(value.key);
+	if (type === "webSearch.update")
+		return (
+			["disabled", "brave", "tavily"].includes(value.provider as string) &&
+			isOptionalString(value.apiKey) &&
+			(value.clearCredential === undefined || typeof value.clearCredential === "boolean")
+		);
 	if (type === "models.setDefault") return value.profileId === null || isNonEmptyString(value.profileId);
 	if (type === "models.delete") return isNonEmptyString(value.profileId);
 	if (type === "models.testConnection") return isNonEmptyString(value.profileId);

@@ -102,6 +102,7 @@ export class RpcPiAgentPort implements PiAgentPort {
 	private stderrBuffer = "";
 	private sensitiveValues: string[] = [];
 	private runtimeOptions: PiRuntimeOptions | undefined;
+	private streamingMessageId: string | undefined;
 
 	constructor(options: RpcPiAgentPortOptions = {}) {
 		this.options = options;
@@ -125,14 +126,22 @@ export class RpcPiAgentPort implements PiAgentPort {
 		args.push(options.projectTrusted ? "--approve" : "--no-approve");
 		if (options.globalSystemPrompt?.trim()) args.push("--append-system-prompt", options.globalSystemPrompt);
 		for (const directory of options.skillDirectories) args.push("--skill", directory);
+		for (const extensionPath of options.extensionPaths) args.push("--extension", extensionPath);
 		if (options.selectedModel)
 			args.push("--provider", options.selectedModel.providerId, "--model", options.selectedModel.modelId);
 		const child = spawn(command, args, {
 			cwd: options.cwd,
-			env: { ...process.env, ...this.options.env, PI_CODING_AGENT_DIR: options.agentDirectory, ...modelConfig.env },
+			env: {
+				...process.env,
+				...this.options.env,
+				PI_CODING_AGENT_DIR: options.agentDirectory,
+				...modelConfig.env,
+				...options.env,
+			},
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		this.process = child;
+		this.sensitiveValues = [...modelConfig.secrets, ...options.sensitiveValues];
 		if (!child.stdin || !child.stdout)
 			throw new DesktopError("PROCESS_ERROR", "Pi RPC process did not expose stdin/stdout");
 		child.stdout.setEncoding("utf8");
@@ -154,6 +163,8 @@ export class RpcPiAgentPort implements PiAgentPort {
 		const messages = (responseData(messagesResponse) as { messages?: unknown[] } | undefined)?.messages;
 		if (Array.isArray(messages)) this.state.messageCount = messages.length;
 		await this.send({ type: "get_commands" });
+		await this.send({ type: "set_thinking_level", level: options.thinkingLevel });
+		this.state.thinkingLevel = options.thinkingLevel;
 		this.emit({ type: "ready", runtimeId: options.runtimeId, state: { ...this.state } });
 		return { ...this.state };
 	}
@@ -162,6 +173,7 @@ export class RpcPiAgentPort implements PiAgentPort {
 		const child = this.process;
 		if (!child) return;
 		this.process = undefined;
+		this.streamingMessageId = undefined;
 		this.stopReader?.();
 		this.stopReader = undefined;
 		this.rejectPending(new Error("Pi RPC process stopped"));
@@ -283,10 +295,19 @@ export class RpcPiAgentPort implements PiAgentPort {
 				? { ...normalized, state: { ...this.state, ...normalized.state } }
 				: normalized;
 		if (event.type === "state_changed" || event.type === "ready") this.state = { ...this.state, ...event.state };
-		if (event.type === "message_started")
+		if (event.type === "message_started") {
+			if (event.message.role === "assistant") this.streamingMessageId = event.message.id;
 			this.state = { ...this.state, isStreaming: true, messageCount: this.state.messageCount + 1 };
-		if (event.type === "message_finished" || event.type === "aborted")
+		}
+		if (event.type === "message_delta" && this.streamingMessageId) event.messageId = this.streamingMessageId;
+		if (event.type === "message_finished") {
+			if (event.message.role === "assistant" && this.streamingMessageId) event.message.id = this.streamingMessageId;
+		}
+		if (event.type === "aborted") {
 			this.state = { ...this.state, isStreaming: false };
+			this.streamingMessageId = undefined;
+		}
+		if (event.type === "state_changed" && event.state.isStreaming === false) this.streamingMessageId = undefined;
 		this.emit({ ...event, runtimeId: this.runtimeOptions.runtimeId } as PiAgentEvent);
 	}
 

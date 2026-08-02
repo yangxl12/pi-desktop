@@ -10,11 +10,17 @@ import type { MetadataRepository, SecretStore } from "./ports.ts";
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
 	globalSystemPrompt: "",
-	invokeShortcut: "Ctrl+Shift+0",
+	invokeShortcut: "Alt+Shift+O",
 	defaultModelProfileId: null,
+	defaultThinkingLevel: "high",
+	conversationFontSize: 16,
+	sidebarFontSize: 14,
 	closeToTray: true,
 	skillDirectories: [],
-	schemaVersion: 1,
+	locale: "zh-CN",
+	theme: "dark",
+	webSearch: { provider: "disabled", credentialRef: null },
+	schemaVersion: 5,
 };
 
 export class MemoryMetadataRepository implements MetadataRepository {

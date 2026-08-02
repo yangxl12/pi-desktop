@@ -74,6 +74,7 @@ export class PiSessionFileRepository implements SessionFileRepository {
 		let modelId: string | null = null;
 		let level: ThinkingLevel = "off";
 		let leafId: string | null = null;
+		let hasMessages = false;
 		let updatedAt = asString(header.timestamp) ?? new Date(0).toISOString();
 		for (const entry of entries.slice(1)) {
 			leafId = asString(entry.id) ?? leafId;
@@ -85,6 +86,7 @@ export class PiSessionFileRepository implements SessionFileRepository {
 				modelId = asString(entry.modelId) ?? modelId;
 			}
 			if (entry.type !== "message") continue;
+			hasMessages = true;
 			const message = asRecord(entry.message);
 			if (!message) continue;
 			if (message.role === "user" && !firstUserText) firstUserText = messageText(message);
@@ -105,6 +107,7 @@ export class PiSessionFileRepository implements SessionFileRepository {
 			modelId,
 			thinkingLevel: level,
 			leafId,
+			hasMessages,
 		};
 	}
 

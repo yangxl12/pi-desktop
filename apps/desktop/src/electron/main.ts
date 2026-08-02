@@ -9,7 +9,7 @@ import {
 	isElectronShellRequest,
 } from "../shared/electron-shell-ipc.ts";
 
-const port = 4317;
+const port = Number(process.env.PI_DESKTOP_PORT ?? 4317);
 const hostToken = randomBytes(32).toString("hex");
 let window: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -17,9 +17,10 @@ let host: ChildProcess | null = null;
 let registeredShortcut: string | undefined;
 let closeToTray = true;
 let quitting = false;
+let shortcutReturnTarget: "tray" | "minimized" | null = null;
 
 function resourcePath(...parts: string[]): string {
-	return join(process.resourcesPath, ...parts);
+	return join(process.env.PI_DESKTOP_RESOURCES_DIR ?? process.resourcesPath, ...parts);
 }
 
 function trayIcon(): Electron.NativeImage {
@@ -74,8 +75,18 @@ function revealWindow(): void {
 
 function toggleWindow(): void {
 	if (!window) return;
-	if (window.isVisible()) window.hide();
-	else revealWindow();
+	if (window.isMinimized()) {
+		shortcutReturnTarget = "minimized";
+		revealWindow();
+		return;
+	}
+	if (!window.isVisible()) {
+		shortcutReturnTarget = "tray";
+		revealWindow();
+		return;
+	}
+	if (shortcutReturnTarget === "minimized") window.minimize();
+	else window.hide();
 }
 
 async function waitForHost(): Promise<void> {
@@ -103,6 +114,7 @@ function startHost(): void {
 			PI_PACKAGE_DIR: resourcePath("app"),
 			PI_DESKTOP_RENDERER_DIR: resourcePath("app", "renderer"),
 			PI_DESKTOP_LUCIDE_DIR: resourcePath("app", "lucide"),
+			PI_DESKTOP_WEB_SEARCH_EXTENSION: resourcePath("app", "extensions", "web-search.mjs"),
 		},
 		stdio: ["ignore", "ignore", "ignore", "ipc"],
 	});
@@ -244,6 +256,7 @@ function createWindow(): void {
 		webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
 	});
 	window.removeMenu();
+	if (process.env.PI_DESKTOP_DEVTOOLS === "1") window.webContents.openDevTools({ mode: "detach" });
 	window.on("close", (event) => {
 		if (quitting) return;
 		event.preventDefault();

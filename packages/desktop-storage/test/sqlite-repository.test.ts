@@ -48,6 +48,7 @@ describe("SQLite metadata repository", () => {
 		await repository.saveSettings({
 			...settings,
 			defaultModelProfileId: "model-1",
+			theme: "light",
 			skillDirectories: [join(directory, "skills")],
 		});
 		await repository.close();
@@ -64,6 +65,7 @@ describe("SQLite metadata repository", () => {
 		expect(await reopened.loadSettings()).toEqual(
 			expect.objectContaining({
 				defaultModelProfileId: "model-1",
+				theme: "light",
 				skillDirectories: [join(directory, "skills")],
 			}),
 		);

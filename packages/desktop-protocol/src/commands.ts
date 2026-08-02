@@ -17,6 +17,7 @@ import type {
 	SkillCommand,
 	ThinkingLevel,
 	TrustState,
+	WebSearchProvider,
 } from "./types.ts";
 
 export type DesktopCommandBase =
@@ -54,6 +55,7 @@ export type DesktopCommandBase =
 	| { type: "settings.get" }
 	| { type: "settings.update"; patch: Partial<AppSettings> }
 	| { type: "settings.reset"; key: keyof AppSettings }
+	| { type: "webSearch.update"; provider: WebSearchProvider; apiKey?: string; clearCredential?: boolean }
 	| { type: "models.list" }
 	| { type: "models.create"; profile: ModelProfileDraft; apiKey?: string }
 	| { type: "models.update"; profileId: string; patch: ModelProfilePatch; apiKey?: string; clearCredential?: boolean }

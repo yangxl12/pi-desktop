@@ -8,6 +8,12 @@ export type QueueMode = "prompt" | "steer" | "followUp";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+export type AppLocale = "zh-CN" | "en";
+
+export type AppTheme = "light" | "dark";
+
+export type WebSearchProvider = "disabled" | "brave" | "tavily";
+
 export type McpTransport = "stdio" | "http";
 
 export type McpStatus = "stopped" | "starting" | "ready" | "error";
@@ -96,6 +102,7 @@ export interface DesktopMessage {
 	role: "user" | "assistant" | "tool" | "system";
 	parts: MessagePart[];
 	createdAt: string;
+	durationMs?: number;
 	status?: "streaming" | "finished" | "aborted" | "error";
 }
 
@@ -134,8 +141,17 @@ export interface AppSettings {
 	globalSystemPrompt: string;
 	invokeShortcut: string;
 	defaultModelProfileId: string | null;
+	defaultThinkingLevel: ThinkingLevel;
+	conversationFontSize: number;
+	sidebarFontSize: number;
 	closeToTray: boolean;
 	skillDirectories: string[];
+	locale: AppLocale;
+	theme: AppTheme;
+	webSearch: {
+		provider: WebSearchProvider;
+		credentialRef: string | null;
+	};
 	schemaVersion: number;
 }
 

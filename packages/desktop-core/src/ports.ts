@@ -32,8 +32,12 @@ export interface PiRuntimeOptions {
 	globalSystemPrompt?: string;
 	projectTrusted?: boolean;
 	skillDirectories: string[];
+	extensionPaths: string[];
+	env: Record<string, string>;
+	sensitiveValues: string[];
 	models: PiRuntimeModel[];
 	selectedModel?: { providerId: string; modelId: string };
+	thinkingLevel: ThinkingLevel;
 	runtimeId: string;
 }
 
@@ -57,7 +61,7 @@ export interface PiCommandInfo {
 
 export type PiAgentEvent =
 	| { type: "ready"; runtimeId: string; state: PiAgentState }
-	| { type: "state_changed"; runtimeId: string; state: PiAgentState }
+	| { type: "state_changed"; runtimeId: string; state: Partial<PiAgentState> }
 	| { type: "message_started"; runtimeId: string; message: DesktopMessage }
 	| { type: "message_delta"; runtimeId: string; messageId: string; part: "text" | "thinking"; delta: string }
 	| { type: "message_finished"; runtimeId: string; message: DesktopMessage }
@@ -176,6 +180,7 @@ export interface SessionFileSummary {
 	modelId: string | null;
 	thinkingLevel: ThinkingLevel;
 	leafId: string | null;
+	hasMessages: boolean;
 }
 
 export interface SessionScanResult {

@@ -58,7 +58,15 @@ export class FakePiAgentPort implements PiAgentPort {
 				`${JSON.stringify({ type: "session", version: 3, id: randomUUID(), timestamp: new Date().toISOString(), cwd: options.cwd })}\n`,
 			);
 		}
-		this.state = { ...this.state, sessionPath, sessionId: randomUUID(), messageCount: this.messages.length };
+		this.state = {
+			...this.state,
+			sessionPath,
+			sessionId: randomUUID(),
+			thinkingLevel: options.thinkingLevel,
+			modelProvider: options.selectedModel?.providerId ?? null,
+			modelId: options.selectedModel?.modelId ?? null,
+			messageCount: this.messages.length,
+		};
 		this.emit({ type: "ready", runtimeId: this.runtimeId, state: { ...this.state } });
 		return { ...this.state };
 	}
@@ -120,6 +128,7 @@ export class FakePiAgentPort implements PiAgentPort {
 			runtimeId: this.runtimeId,
 			message: { ...this.currentMessage, parts: this.currentMessage.parts.map((part) => ({ ...part })) },
 		});
+		this.emit({ type: "state_changed", runtimeId: this.runtimeId, state: { isStreaming: false } });
 	}
 
 	async steer(message: string): Promise<void> {

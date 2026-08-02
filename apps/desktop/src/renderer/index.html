@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>Pi Desktop</title>
+	<title>Pi 桌面端</title>
 	<link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -11,47 +11,43 @@
 		<aside class="sidebar">
 			<div class="brand-row">
 				<div class="brand-mark">P</div>
-				<div><strong>Pi Desktop</strong><span class="eyebrow">LOCAL AGENT</span></div>
-				<button class="icon-button" data-action="add-project" title="Add project" aria-label="Add project"><span data-icon="plus"></span></button>
+				<div><strong>Pi Desktop</strong><span class="eyebrow" data-i18n="agent.local">本地智能体</span></div>
+				<button class="icon-button" data-action="add-project" data-i18n-title="projects.add" title="添加项目" aria-label="添加项目"><span data-icon="plus"></span></button>
 			</div>
-			<div class="sidebar-label"><span>Projects</span><span id="project-count">0</span></div>
 			<div id="projects" class="project-tree"></div>
 			<div class="sidebar-spacer"></div>
-			<div class="runtime-mini"><span id="runtime-dot" class="status-dot"></span><span id="runtime-mini-label">No runtime</span></div>
-			<button class="sidebar-settings" data-action="open-settings" title="Settings" aria-label="Settings"><span data-icon="settings"></span><span>Settings</span></button>
+			<div class="runtime-mini"><span id="runtime-dot" class="status-dot"></span><span id="runtime-mini-label">未启动运行时</span></div>
+			<button class="sidebar-settings" data-action="open-settings" data-i18n-title="settings" title="设置" aria-label="设置"><span data-icon="settings"></span><span data-i18n="settings">设置</span></button>
 		</aside>
 		<main class="workspace">
 			<section id="chat-view" class="view">
 				<header class="topbar">
-					<div class="breadcrumb"><span id="project-title">No project</span><span class="crumb-slash">/</span><strong id="session-title">New conversation</strong></div>
-					<div class="topbar-controls">
-						<label class="compact-control"><span>Model</span><select id="model-select" aria-label="Model"></select></label>
-						<label class="compact-control"><span>Thinking</span><select id="thinking-select" aria-label="Thinking level"><option value="off">Off</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">X-high</option><option value="max">Max</option></select></label>
-						<button class="icon-button" data-action="open-settings" title="Settings" aria-label="Settings"><span data-icon="settings"></span></button>
-					</div>
+					<div class="breadcrumb"><span id="project-title">未选择项目</span><span class="crumb-slash">/</span><strong id="session-title">新对话</strong></div>
 				</header>
 				<div id="trust-banner" class="trust-banner hidden"></div>
 				<div id="messages" class="messages"></div>
 				<div id="error-row" class="error-row hidden"></div>
 				<section class="composer-wrap">
 					<div id="slash-menu" class="slash-menu hidden"></div>
-					<div id="queue-controls" class="queue-controls hidden"><span>While streaming</span><button data-queue="steer">Steer</button><button data-queue="followUp">Follow up</button></div>
+					<div id="queue-controls" class="queue-controls hidden"><span data-i18n="streaming">生成中</span><button data-queue="steer" data-i18n="stream.steer">插入指令</button><button data-queue="followUp" data-i18n="stream.follow">完成后继续</button></div>
 					<form id="prompt-form" class="composer">
-						<textarea id="prompt-input" rows="3" placeholder="Ask Pi to work in this project" aria-label="Message Pi"></textarea>
-						<div class="composer-footer"><span id="composer-hint" class="muted">Enter to send; Shift+Enter for a new line</span><div class="composer-actions"><button class="icon-button" type="button" data-action="clear-prompt" title="Clear message" aria-label="Clear message"><span data-icon="x"></span></button><button class="send-button" type="submit" title="Send message" aria-label="Send message"><span data-icon="send"></span></button><button class="stop-button hidden" type="button" data-action="abort" title="Stop response" aria-label="Stop response"><span data-icon="square"></span></button></div></div>
+						<div class="composer-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" tabindex="0" data-i18n-title="prompt.resize" title="调整输入框高度" aria-label="调整输入框高度"></div>
+						<textarea id="prompt-input" rows="3" placeholder="请输入" data-i18n-title="prompt.placeholder" aria-label="请输入"></textarea>
+						<div class="composer-footer"><span id="composer-hint" class="muted">Enter 发送，Shift+Enter 换行</span><div class="composer-actions"><label class="composer-model"><span data-i18n="model">模型</span><select id="model-select" aria-label="模型"></select></label><label class="compact-control composer-thinking"><span data-i18n="thinking">思考强度</span><select id="thinking-select" data-i18n-title="thinking" aria-label="思考强度"><option value="off">关闭</option><option value="minimal">极低</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">很高</option><option value="max">最高</option></select></label><button class="icon-button" type="button" data-action="open-settings" data-i18n-title="settings" title="设置" aria-label="设置"><span data-icon="settings"></span></button><button class="icon-button" type="button" data-action="clear-prompt" data-i18n-title="prompt.clear" title="清空消息" aria-label="清空消息"><span data-icon="x"></span></button><button class="send-button" type="submit" data-i18n-title="prompt.send" title="发送消息" aria-label="发送消息"><span data-icon="send"></span></button><button class="stop-button hidden" type="button" data-action="abort" data-i18n-title="prompt.stop" title="停止生成" aria-label="停止生成"><span data-icon="square"></span></button></div></div>
 					</form>
 				</section>
 			</section>
 			<section id="settings-view" class="view settings-view hidden">
-				<header class="topbar"><div class="breadcrumb"><strong>Settings</strong><span class="crumb-slash">/</span><span id="settings-section-title">Models</span></div><button class="icon-button" data-action="close-settings" title="Back to chat" aria-label="Back to chat"><span data-icon="arrow-left"></span></button></header>
+				<header class="topbar settings-topbar"><button class="icon-button" data-action="close-settings" data-i18n-title="settings.back" title="返回对话" aria-label="返回对话"><span data-icon="arrow-left"></span></button><div class="breadcrumb"><strong data-i18n="settings">设置</strong><span class="crumb-slash">/</span><span id="settings-section-title">模型</span></div></header>
 				<div class="settings-layout">
-					<nav class="settings-nav"><button class="settings-tab active" data-settings-tab="models"><span data-icon="cpu"></span>Models</button><button class="settings-tab" data-settings-tab="general"><span data-icon="sliders-horizontal"></span>General</button><button class="settings-tab" data-settings-tab="skills"><span data-icon="sparkles"></span>Skills</button><button class="settings-tab" data-settings-tab="mcp"><span data-icon="plug"></span>MCP</button><button class="settings-tab" data-settings-tab="diagnostics"><span data-icon="activity"></span>Diagnostics</button></nav>
+					<nav class="settings-nav"><button class="settings-tab active" data-settings-tab="models"><span data-icon="cpu"></span><span data-i18n="settings.models">模型</span></button><button class="settings-tab" data-settings-tab="general"><span data-icon="sliders-horizontal"></span><span data-i18n="settings.general">通用</span></button><button class="settings-tab" data-settings-tab="skills"><span data-icon="sparkles"></span><span data-i18n="settings.skills">技能</span></button><button class="settings-tab" data-settings-tab="mcp"><span data-icon="plug"></span><span data-i18n="settings.mcp">MCP</span></button><button class="settings-tab" data-settings-tab="diagnostics"><span data-icon="activity"></span><span data-i18n="settings.diagnostics">诊断</span></button></nav>
 					<div id="settings-content" class="settings-content"></div>
 				</div>
 			</section>
 		</main>
 	</div>
 	<div id="toast" class="toast hidden" role="status"></div>
+	<div id="context-menu" class="context-menu hidden" role="menu"></div>
 	<script type="module" src="/app.js"></script>
 </body>
 </html>

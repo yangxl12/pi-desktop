@@ -26,6 +26,8 @@ const rendererDirectory = process.env.PI_DESKTOP_RENDERER_DIR ?? join(here, ".."
 const lucideDirectory =
 	process.env.PI_DESKTOP_LUCIDE_DIR ?? join(here, "..", "..", "..", "..", "node_modules", "lucide", "dist", "esm");
 const port = Number(process.env.PI_DESKTOP_PORT ?? 4317);
+const webSearchExtensionPath =
+	process.env.PI_DESKTOP_WEB_SEARCH_EXTENSION ?? join(here, "..", "extensions", "web-search.ts");
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
 	const chunks: Buffer[] = [];
@@ -123,13 +125,36 @@ async function main(): Promise<void> {
 		agentDirectory: join(dataDirectory, "agent"),
 		sessionDirectory: (project) => projectSessionDirectory(dataDirectory, project.id),
 		logger: new ConsoleDesktopLogger(),
+		webSearchExtensionPath,
 	});
 	await app.initialize();
+	const eventClients = new Set<ServerResponse>();
+	const unsubscribeEvents = app.subscribe((event) => {
+		const payload = `event: desktop\ndata: ${JSON.stringify(event)}\n\n`;
+		for (const client of eventClients) {
+			try {
+				client.write(payload);
+			} catch {
+				eventClients.delete(client);
+			}
+		}
+	});
 	const server = createServer(async (request, response) => {
 		try {
 			const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
 			if (request.method === "GET" && pathname === "/api/state") {
 				sendJson(response, 200, app.getState());
+				return;
+			}
+			if (request.method === "GET" && pathname === "/api/events") {
+				response.writeHead(200, {
+					"content-type": "text/event-stream; charset=utf-8",
+					"cache-control": "no-cache, no-transform",
+					connection: "keep-alive",
+				});
+				response.write(": connected\n\n");
+				eventClients.add(response);
+				request.on("close", () => eventClients.delete(response));
 				return;
 			}
 			if (request.method === "POST" && pathname === "/api/command") {
@@ -151,6 +176,9 @@ async function main(): Promise<void> {
 	const shutdown = async (): Promise<void> => {
 		if (shuttingDown) return;
 		shuttingDown = true;
+		unsubscribeEvents();
+		for (const client of eventClients) client.end();
+		eventClients.clear();
 		await app.dispatch({ type: "app.quit" });
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 		electronPorts?.dispose();

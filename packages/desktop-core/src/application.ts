@@ -13,6 +13,7 @@ import type {
 	McpServerPatch,
 	McpServerProfile,
 	McpServerSnapshot,
+	MessagePart,
 	ModelConnectionResult,
 	ModelProfile,
 	ModelProfileDraft,
@@ -54,14 +55,95 @@ interface ApplicationOptions {
 	logger?: DesktopLogger;
 	agentDirectory?: string;
 	sessionDirectory?: (project: Project) => string;
+	webSearchExtensionPath?: string;
 }
 
 function now(): string {
 	return new Date().toISOString();
 }
 
+const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+function isThinkingLevel(value: unknown): value is ThinkingLevel {
+	return typeof value === "string" && THINKING_LEVELS.includes(value as ThinkingLevel);
+}
+
+function isAppTheme(value: unknown): value is AppSettings["theme"] {
+	return value === "light" || value === "dark";
+}
+
+function isFontSize(value: unknown, min: number, max: number): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
+}
+
 function cloneMessage(message: DesktopMessage): DesktopMessage {
 	return { ...message, parts: message.parts.map((part) => ({ ...part })) };
+}
+
+function mergePartText(current: string, incoming: string, separator = "\n\n"): string {
+	if (!current) return incoming;
+	if (!incoming || current === incoming || current.includes(incoming)) return current;
+	if (incoming.includes(current)) return incoming;
+	return `${current}${separator}${incoming}`;
+}
+
+function mergeMessageParts(target: DesktopMessage, incoming: DesktopMessage): MessagePart[] {
+	const parts = target.parts.map((part) => ({ ...part }));
+	for (const incomingPart of incoming.parts) {
+		const existing =
+			incomingPart.type === "tool"
+				? parts.find(
+						(part) =>
+							part.type === "tool" &&
+							part.toolCallId !== undefined &&
+							part.toolCallId === incomingPart.toolCallId,
+					)
+				: parts.find((part) => part.type === incomingPart.type);
+		if (!existing) {
+			parts.push({ ...incomingPart });
+			continue;
+		}
+		if (existing.type === "tool" && incomingPart.type === "tool") {
+			if (incomingPart.text.length >= existing.text.length) existing.text = incomingPart.text;
+			if (incomingPart.toolName) existing.toolName = incomingPart.toolName;
+			if (incomingPart.status) existing.status = incomingPart.status;
+		} else {
+			existing.text = mergePartText(existing.text, incomingPart.text);
+		}
+	}
+	return parts;
+}
+
+function collapseMessages(messages: DesktopMessage[]): DesktopMessage[] {
+	const result: DesktopMessage[] = [];
+	for (const message of messages) {
+		if (message.role === "user" || message.role === "system") {
+			result.push(cloneMessage(message));
+			continue;
+		}
+		const previous = result.at(-1);
+		if (message.role === "tool") {
+			if (previous?.role === "assistant") previous.parts = mergeMessageParts(previous, message);
+			continue;
+		}
+		if (message.role !== "assistant") continue;
+		if (previous?.role === "assistant") {
+			previous.parts = mergeMessageParts(previous, message);
+			previous.status = message.status ?? previous.status;
+			if (message.durationMs !== undefined) previous.durationMs = message.durationMs;
+			continue;
+		}
+		result.push(cloneMessage(message));
+	}
+	return result;
+}
+
+function messageFingerprint(message: DesktopMessage): string {
+	return message.parts.map((part) => `${part.type}:${part.toolCallId ?? ""}:${part.text}`).join("\u0001");
+}
+
+function hasVisibleMessageContent(message: DesktopMessage): boolean {
+	return message.parts.some((part) => part.text.trim().length > 0);
 }
 
 function truncateTitle(text: string): string {
@@ -83,7 +165,7 @@ function asRuntimeSnapshot(
 		runtimeId,
 		status: state.status,
 		isStreaming: state.isStreaming ?? false,
-		thinkingLevel: state.thinkingLevel ?? "off",
+		thinkingLevel: state.thinkingLevel ?? "high",
 		modelProvider: state.modelProvider ?? null,
 		modelId: state.modelId ?? null,
 		sessionPath: state.sessionPath ?? null,
@@ -128,7 +210,13 @@ export class DesktopApplication {
 	private readonly listeners = new Set<(event: DesktopEvent) => void>();
 	private readonly diagnostics: Diagnostic[] = [];
 	private readonly messages = new Map<string, DesktopMessage>();
-	private settings: AppSettings = { ...DEFAULT_APP_SETTINGS, skillDirectories: [] };
+	private streamingAssistantMessageId: string | undefined;
+	private readonly assistantStartedAt = new Map<string, number>();
+	private settings: AppSettings = {
+		...DEFAULT_APP_SETTINGS,
+		skillDirectories: [],
+		webSearch: { ...DEFAULT_APP_SETTINGS.webSearch },
+	};
 	private projects: Project[] = [];
 	private conversations: ConversationIndex[] = [];
 	private models: ModelProfile[] = [];
@@ -137,6 +225,8 @@ export class DesktopApplication {
 	private commands: SkillCommand[] = [];
 	private activeProjectId: string | null = null;
 	private activeSessionId: string | null = null;
+	private draftSession: ConversationIndex | null = null;
+	private draftPromotion: Promise<void> | undefined;
 	private runtime: RuntimeSnapshot | null = null;
 	private piUnsubscribe: (() => void) | undefined;
 	private registeredShortcut: string | undefined;
@@ -160,11 +250,28 @@ export class DesktopApplication {
 			...DEFAULT_APP_SETTINGS,
 			...savedSettings,
 			skillDirectories: [...(savedSettings.skillDirectories ?? [])],
+			webSearch: { ...DEFAULT_APP_SETTINGS.webSearch, ...(savedSettings.webSearch ?? {}) },
 		};
+		if (!isThinkingLevel(this.settings.defaultThinkingLevel)) this.settings.defaultThinkingLevel = "high";
+		if (!isAppTheme(this.settings.theme)) this.settings.theme = "dark";
+		if (!isFontSize(this.settings.conversationFontSize, 14, 20)) this.settings.conversationFontSize = 16;
+		if (!isFontSize(this.settings.sidebarFontSize, 12, 18)) this.settings.sidebarFontSize = 14;
+		if (
+			this.options.platform === "win32" &&
+			this.settings.schemaVersion < DEFAULT_APP_SETTINGS.schemaVersion &&
+			this.settings.invokeShortcut === "Ctrl+Shift+0"
+		) {
+			this.settings.invokeShortcut = defaultInvokeShortcut(this.options.platform);
+		}
+		this.settings.schemaVersion = DEFAULT_APP_SETTINGS.schemaVersion;
 		if (!this.settings.invokeShortcut) this.settings.invokeShortcut = defaultInvokeShortcut(this.options.platform);
 		await this.options.ports.window.setCloseToTray(this.settings.closeToTray);
 		this.projects = await this.options.metadata.listProjects();
 		this.models = await this.options.metadata.listModels();
+		const firstEnabledModel = this.models.find((model) => model.enabled);
+		if (!this.models.some((model) => model.id === this.settings.defaultModelProfileId && model.enabled))
+			this.settings.defaultModelProfileId = firstEnabledModel?.id ?? null;
+		await this.options.metadata.saveSettings(this.settings);
 		this.mcpProfiles = await this.options.metadata.listMcpServers();
 		this.options.mcp?.setProfiles(this.mcpProfiles);
 		this.mcpServers = this.options.mcp?.list() ?? [];
@@ -207,7 +314,7 @@ export class DesktopApplication {
 			conversations: this.conversations.map((conversation) => ({ ...conversation })),
 			activeSessionId: this.activeSessionId,
 			runtime: this.runtime ? { ...this.runtime } : null,
-			messages: [...this.messages.values()].map(cloneMessage),
+			messages: collapseMessages([...this.messages.values()]),
 			models: this.models.map((model) => ({ ...model })),
 			commands: this.commands.map((command) => ({ ...command })),
 			mcpServers: this.mcpServers.map((server) => ({
@@ -273,7 +380,7 @@ export class DesktopApplication {
 			case "agent.getState":
 				return this.requireRuntimeState();
 			case "agent.getMessages":
-				return [...this.messages.values()].map(cloneMessage);
+				return collapseMessages([...this.messages.values()]);
 			case "agent.prompt":
 				return this.prompt(command.text, command.queueMode ?? "prompt");
 			case "agent.retryLast":
@@ -292,6 +399,8 @@ export class DesktopApplication {
 				return this.updateSettings(command.patch);
 			case "settings.reset":
 				return this.resetSetting(command.key);
+			case "webSearch.update":
+				return this.updateWebSearch(command.provider, command.apiKey, command.clearCredential);
 			case "models.list":
 				return this.models;
 			case "models.create":
@@ -350,12 +459,12 @@ export class DesktopApplication {
 		const previous = this.registeredShortcut;
 		try {
 			if (previous) await this.options.ports.shortcut.unregister(previous);
-			await this.options.ports.shortcut.register(normalized, () => void this.showWindow());
+			await this.options.ports.shortcut.register(normalized, () => void this.options.ports.window.toggle());
 			this.registeredShortcut = normalized;
 		} catch (error: unknown) {
 			if (previous) {
 				try {
-					await this.options.ports.shortcut.register(previous, () => void this.showWindow());
+					await this.options.ports.shortcut.register(previous, () => void this.options.ports.window.toggle());
 				} catch {
 					// Preserve the original registration error.
 				}
@@ -397,6 +506,7 @@ export class DesktopApplication {
 		await this.stopRuntime("project changed");
 		this.activeProjectId = project.id;
 		this.activeSessionId = null;
+		this.draftSession = null;
 		project.lastOpenedAt = now();
 		project.updatedAt = project.lastOpenedAt;
 		await this.options.metadata.saveProject(project);
@@ -437,6 +547,7 @@ export class DesktopApplication {
 			await this.stopRuntime("project removed");
 			this.activeProjectId = null;
 			this.activeSessionId = null;
+			this.draftSession = null;
 			this.conversations = [];
 			this.messages.clear();
 		}
@@ -449,18 +560,31 @@ export class DesktopApplication {
 		const project = this.projects.find((candidate) => candidate.id === projectId);
 		if (!project) throw new DesktopError("NOT_FOUND", "Project not found", { projectId });
 		if (this.activeProjectId !== projectId) await this.selectProject(projectId);
+		if (
+			this.draftSession?.id === this.activeSessionId &&
+			!this.runtime?.isStreaming &&
+			[...this.messages.values()].some(
+				(message) => message.role === "assistant" && hasVisibleMessageContent(message),
+			)
+		)
+			await this.promoteDraftSession();
 		if (this.runtime?.projectId === projectId) {
 			if (this.runtime.isStreaming) await this.abort();
-			const state = await this.requirePi().newSession();
+			await this.requirePi().newSession();
+			const defaultProfile = this.models.find(
+				(model) => model.id === this.settings.defaultModelProfileId && model.enabled,
+			);
+			if (defaultProfile) await this.requirePi().setModel(defaultProfile.providerId, defaultProfile.modelId);
+			await this.requirePi().setThinkingLevel(this.settings.defaultThinkingLevel);
+			const state = await this.requirePi().getState();
 			this.messages.clear();
 			const session = this.buildSessionIndex(project, state, title);
+			this.draftSession = session;
 			this.activeSessionId = session.id;
 			this.runtime = asRuntimeSnapshot(project.id, session.id, this.runtime.runtimeId, {
 				status: "ready",
 				...state,
 			});
-			await this.options.metadata.saveConversation(session);
-			this.conversations = await this.options.metadata.listConversations(projectId);
 			if (session.title !== "New conversation") await this.requirePi().setSessionName(session.title);
 			await this.refreshRuntimeMessages();
 			this.emit({ type: "session.changed", ...this.runtime, sessionId: session.id, projectId });
@@ -469,12 +593,11 @@ export class DesktopApplication {
 		await this.startRuntime(project);
 		const state = await this.requirePi().getState();
 		const session = this.buildSessionIndex(project, state, title);
+		this.draftSession = session;
 		this.activeSessionId = session.id;
 		if (this.runtime) {
 			this.runtime = { ...this.runtime, sessionId: session.id, sessionPath: session.sessionPath };
 		}
-		await this.options.metadata.saveConversation(session);
-		this.conversations = await this.options.metadata.listConversations(projectId);
 		if (session.title !== "New conversation") await this.requirePi().setSessionName(session.title);
 		return session;
 	}
@@ -518,6 +641,7 @@ export class DesktopApplication {
 			if (this.activeSessionId === session.id) return session;
 			if (this.runtime.isStreaming) await this.abort();
 			await this.requirePi().switchSession(session.sessionPath);
+			this.draftSession = null;
 			this.activeSessionId = session.id;
 			this.messages.clear();
 			const state = await this.requirePi().getState();
@@ -532,6 +656,7 @@ export class DesktopApplication {
 		}
 		await this.stopRuntime("session changed");
 		this.activeProjectId = project.id;
+		this.draftSession = null;
 		this.activeSessionId = session.id;
 		await this.startRuntime(project, session);
 		return session;
@@ -567,8 +692,17 @@ export class DesktopApplication {
 		if (!this.options.sessionFiles) return this.options.metadata.listConversations(projectId);
 		const result = await this.options.sessionFiles.scan(this.sessionDirectory(project));
 		for (const message of result.diagnostics) this.recordDiagnostic("warning", "session-index", message);
-		const stored = await this.options.metadata.listConversations(projectId);
+		let stored = await this.options.metadata.listConversations(projectId);
+		const emptySessionPaths = new Set(
+			result.sessions.filter((summary) => !summary.hasMessages).map((summary) => summary.sessionPath),
+		);
+		for (const conversation of stored) {
+			if (emptySessionPaths.has(conversation.sessionPath))
+				await this.options.metadata.deleteConversation(conversation.id);
+		}
+		stored = await this.options.metadata.listConversations(projectId);
 		for (const summary of result.sessions) {
+			if (!summary.hasMessages) continue;
 			const existing = stored.find((candidate) => candidate.sessionPath === summary.sessionPath);
 			await this.options.metadata.saveConversation(conversationFromSummary(projectId, summary, existing));
 		}
@@ -590,11 +724,25 @@ export class DesktopApplication {
 	}
 
 	private async loadProjectConversations(project: Project): Promise<ConversationIndex[]> {
-		const stored = await this.options.metadata.listConversations(project.id);
+		let stored = await this.options.metadata.listConversations(project.id);
 		if (!this.options.sessionFiles) return stored;
 		const result = await this.options.sessionFiles.scan(this.sessionDirectory(project));
 		for (const message of result.diagnostics) this.recordDiagnostic("warning", "session-index", message);
+		const emptySessionPaths = new Set(
+			result.sessions.filter((summary) => !summary.hasMessages).map((summary) => summary.sessionPath),
+		);
+		for (const conversation of stored) {
+			if (
+				emptySessionPaths.has(conversation.sessionPath) ||
+				(conversation.title === "New conversation" &&
+					conversation.leafId === null &&
+					!(await this.options.sessionFiles.exists(conversation.sessionPath)))
+			)
+				await this.options.metadata.deleteConversation(conversation.id);
+		}
+		stored = await this.options.metadata.listConversations(project.id);
 		for (const summary of result.sessions) {
+			if (!summary.hasMessages) continue;
 			const existing = stored.find((candidate) => candidate.sessionPath === summary.sessionPath);
 			await this.options.metadata.saveConversation(conversationFromSummary(project.id, summary, existing));
 		}
@@ -608,11 +756,12 @@ export class DesktopApplication {
 		this.activeProjectId = project.id;
 		this.activeSessionId = session?.id ?? null;
 		this.messages.clear();
+		this.streamingAssistantMessageId = undefined;
 		this.commands = [];
 		this.runtime = asRuntimeSnapshot(project.id, sessionId, runtimeId, {
 			status: "starting",
 			sessionPath: session?.sessionPath ?? null,
-			thinkingLevel: session?.thinkingLevel ?? "off",
+			thinkingLevel: session?.thinkingLevel ?? this.settings.defaultThinkingLevel,
 		});
 		this.emit({ type: "runtime.started", projectId: project.id, sessionId, runtimeId });
 		try {
@@ -623,8 +772,11 @@ export class DesktopApplication {
 			await this.refreshCommands();
 			if (session && state.sessionPath && state.sessionPath !== session.sessionPath) {
 				const updated = { ...session, sessionPath: state.sessionPath, updatedAt: now() };
-				await this.options.metadata.saveConversation(updated);
-				this.conversations = await this.options.metadata.listConversations(project.id);
+				if (this.draftSession?.id === session.id) this.draftSession = updated;
+				else {
+					await this.options.metadata.saveConversation(updated);
+					this.conversations = await this.options.metadata.listConversations(project.id);
+				}
 			}
 			this.emit({ type: "runtime.ready", projectId: project.id, sessionId, runtimeId, snapshot: this.runtime });
 		} catch (error: unknown) {
@@ -647,6 +799,8 @@ export class DesktopApplication {
 
 	private async buildRuntimeOptions(project: Project, session: ConversationIndex | undefined, runtimeId: string) {
 		const models: PiRuntimeModel[] = [];
+		const env: Record<string, string> = {};
+		const sensitiveValues: string[] = [];
 		for (const profile of this.models.filter((candidate) => candidate.enabled)) {
 			const apiKey =
 				profile.credentialRef && this.options.secrets
@@ -669,6 +823,17 @@ export class DesktopApplication {
 			session?.modelProvider && session.modelId
 				? { providerId: session.modelProvider, modelId: session.modelId }
 				: undefined;
+		if (this.settings.webSearch.provider !== "disabled" && this.settings.webSearch.credentialRef) {
+			const apiKey = this.options.secrets
+				? await this.options.secrets.get(this.settings.webSearch.credentialRef)
+				: null;
+			if (apiKey) {
+				env[this.settings.webSearch.provider === "brave" ? "BRAVE_SEARCH_API_KEY" : "TAVILY_API_KEY"] = apiKey;
+				sensitiveValues.push(apiKey);
+			} else {
+				this.recordDiagnostic("warning", "web-search", "Web search credential is unavailable");
+			}
+		}
 		return {
 			cwd: project.rootPath,
 			sessionPath: session?.sessionPath,
@@ -677,10 +842,17 @@ export class DesktopApplication {
 			globalSystemPrompt: this.settings.globalSystemPrompt,
 			projectTrusted: project.trustState === "trusted",
 			skillDirectories: [...this.settings.skillDirectories],
+			extensionPaths:
+				this.settings.webSearch.provider !== "disabled" && this.options.webSearchExtensionPath
+					? [this.options.webSearchExtensionPath]
+					: [],
+			env,
+			sensitiveValues,
 			models,
 			selectedModel:
 				sessionModel ??
 				(defaultProfile ? { providerId: defaultProfile.providerId, modelId: defaultProfile.modelId } : undefined),
+			thinkingLevel: session?.thinkingLevel ?? this.settings.defaultThinkingLevel,
 			runtimeId,
 		};
 	}
@@ -704,7 +876,7 @@ export class DesktopApplication {
 
 	private async restartActiveRuntime(reason: string): Promise<void> {
 		const project = this.projects.find((candidate) => candidate.id === this.activeProjectId);
-		const session = this.conversations.find((candidate) => candidate.id === this.activeSessionId);
+		const session = this.activeConversation();
 		if (!project || !session) return;
 		await this.stopRuntime(reason);
 		await this.startRuntime(project, session);
@@ -717,6 +889,13 @@ export class DesktopApplication {
 
 	private requirePi(): PiAgentPort {
 		return this.options.pi;
+	}
+
+	private activeConversation(): ConversationIndex | undefined {
+		return (
+			this.conversations.find((candidate) => candidate.id === this.activeSessionId) ??
+			(this.draftSession?.id === this.activeSessionId ? this.draftSession : undefined)
+		);
 	}
 
 	private requireFolderPicker() {
@@ -733,11 +912,14 @@ export class DesktopApplication {
 			throw new DesktopError("CONFLICT", "Choose steer or follow-up while Pi is streaming");
 		if (!this.runtime.isStreaming && queueMode !== "prompt")
 			throw new DesktopError("CONFLICT", "Queue modes are only available while Pi is streaming");
-		const session = this.conversations.find((candidate) => candidate.id === this.activeSessionId);
+		const session = this.activeConversation();
 		if (session && session.title === "New conversation") {
 			const updated = { ...session, title: truncateTitle(text), updatedAt: now() };
-			await this.options.metadata.saveConversation(updated);
-			this.conversations = await this.options.metadata.listConversations(updated.projectId);
+			if (this.draftSession?.id === session.id) this.draftSession = updated;
+			else {
+				await this.options.metadata.saveConversation(updated);
+				this.conversations = await this.options.metadata.listConversations(updated.projectId);
+			}
 			await this.requirePi().setSessionName(updated.title);
 		}
 		if (queueMode === "steer") await this.requirePi().steer(text);
@@ -787,9 +969,18 @@ export class DesktopApplication {
 			...this.settings,
 			...patch,
 			skillDirectories: [...(patch.skillDirectories ?? this.settings.skillDirectories)],
+			webSearch: { ...this.settings.webSearch, ...(patch.webSearch ?? {}) },
 		};
 		if (patch.globalSystemPrompt !== undefined && patch.globalSystemPrompt.length > 100_000)
 			throw new DesktopError("INVALID_ARGUMENT", "Global system prompt is too long");
+		if (patch.defaultThinkingLevel !== undefined && !isThinkingLevel(patch.defaultThinkingLevel))
+			throw new DesktopError("INVALID_ARGUMENT", "Default thinking level is invalid");
+		if (patch.theme !== undefined && !isAppTheme(patch.theme))
+			throw new DesktopError("INVALID_ARGUMENT", "Theme must be light or dark");
+		if (patch.conversationFontSize !== undefined && !isFontSize(patch.conversationFontSize, 14, 20))
+			throw new DesktopError("INVALID_ARGUMENT", "Conversation font size must be an integer from 14 to 20");
+		if (patch.sidebarFontSize !== undefined && !isFontSize(patch.sidebarFontSize, 12, 18))
+			throw new DesktopError("INVALID_ARGUMENT", "Sidebar font size must be an integer from 12 to 18");
 		if (patch.skillDirectories !== undefined) {
 			const paths = await Promise.all(patch.skillDirectories.map((path) => canonicalizeResourcePath(path)));
 			next.skillDirectories = [...new Set(paths)];
@@ -801,7 +992,11 @@ export class DesktopApplication {
 		if (patch.closeToTray !== undefined) await this.options.ports.window.setCloseToTray(next.closeToTray);
 		await this.options.metadata.saveSettings(next);
 		this.settings = next;
-		return { ...this.settings, skillDirectories: [...this.settings.skillDirectories] };
+		return {
+			...this.settings,
+			skillDirectories: [...this.settings.skillDirectories],
+			webSearch: { ...this.settings.webSearch },
+		};
 	}
 
 	private async resetSetting(key: keyof AppSettings): Promise<AppSettings> {
@@ -811,6 +1006,25 @@ export class DesktopApplication {
 			skillDirectories: [],
 		};
 		return this.updateSettings({ [key]: defaults[key] });
+	}
+
+	private async updateWebSearch(
+		provider: AppSettings["webSearch"]["provider"],
+		apiKey?: string,
+		clearCredential?: boolean,
+	): Promise<AppSettings> {
+		let credentialRef = this.settings.webSearch.credentialRef;
+		if (clearCredential && credentialRef && this.options.secrets) {
+			await this.options.secrets.delete(credentialRef);
+			credentialRef = null;
+		}
+		if (apiKey?.trim()) {
+			if (!this.options.secrets) throw new DesktopError("NOT_SUPPORTED", "Secure credential storage is unavailable");
+			credentialRef = await this.options.secrets.set(apiKey.trim(), credentialRef ?? undefined);
+		}
+		const settings = await this.updateSettings({ webSearch: { provider, credentialRef } });
+		if (this.runtime) await this.restartActiveRuntime("web search settings changed");
+		return settings;
 	}
 
 	private validateModelDraft(input: ModelProfileDraft, existingId?: string): ModelProfileDraft {
@@ -856,6 +1070,7 @@ export class DesktopApplication {
 			throw error;
 		}
 		this.models = await this.options.metadata.listModels();
+		await this.ensureDefaultModel();
 		await this.restartActiveRuntime("model profiles changed");
 		return profile;
 	}
@@ -893,8 +1108,7 @@ export class DesktopApplication {
 		};
 		await this.options.metadata.saveModel(updated);
 		this.models = await this.options.metadata.listModels();
-		if (this.settings.defaultModelProfileId === profileId && !updated.enabled)
-			await this.updateSettings({ defaultModelProfileId: null });
+		await this.ensureDefaultModel();
 		await this.restartActiveRuntime("model profiles changed");
 		return updated;
 	}
@@ -905,7 +1119,7 @@ export class DesktopApplication {
 		if (profile.credentialRef && this.options.secrets) await this.options.secrets.delete(profile.credentialRef);
 		await this.options.metadata.deleteModel(profileId);
 		this.models = await this.options.metadata.listModels();
-		if (this.settings.defaultModelProfileId === profileId) await this.updateSettings({ defaultModelProfileId: null });
+		await this.ensureDefaultModel();
 		await this.restartActiveRuntime("model profiles changed");
 		return null;
 	}
@@ -923,7 +1137,14 @@ export class DesktopApplication {
 	private async setDefaultModel(profileId: string | null): Promise<AppSettings> {
 		if (profileId !== null && !this.models.some((model) => model.id === profileId && model.enabled))
 			throw new DesktopError("NOT_FOUND", "Enabled model profile not found", { profileId });
-		return this.updateSettings({ defaultModelProfileId: profileId });
+		return this.updateSettings({
+			defaultModelProfileId: profileId ?? this.models.find((model) => model.enabled)?.id ?? null,
+		});
+	}
+
+	private async ensureDefaultModel(): Promise<void> {
+		if (this.models.some((model) => model.id === this.settings.defaultModelProfileId && model.enabled)) return;
+		await this.updateSettings({ defaultModelProfileId: this.models.find((model) => model.enabled)?.id ?? null });
 	}
 
 	private async reloadSkills(): Promise<SkillCommand[]> {
@@ -1011,9 +1232,52 @@ export class DesktopApplication {
 	}
 
 	private async refreshRuntimeMessages(): Promise<void> {
-		const messages = await this.requirePi().getMessages();
+		const previousMessages = collapseMessages([...this.messages.values()]);
+		const previous = new Map(previousMessages.map((message) => [message.id, message]));
+		const messages = collapseMessages(await this.requirePi().getMessages());
 		this.messages.clear();
-		for (const message of messages) this.messages.set(message.id, cloneMessage(message));
+		const consumedPreviousIds = new Set<string>();
+		for (const message of messages) {
+			const current =
+				(previous.get(message.id) && !consumedPreviousIds.has(message.id) ? previous.get(message.id) : undefined) ??
+				[...previous.values()].find(
+					(candidate) =>
+						!consumedPreviousIds.has(candidate.id) &&
+						candidate.role === message.role &&
+						messageFingerprint(candidate) === messageFingerprint(message),
+				) ??
+				(message.role === "assistant" && !hasVisibleMessageContent(message)
+					? [...previous.values()]
+							.reverse()
+							.find(
+								(candidate) =>
+									candidate.role === "assistant" &&
+									hasVisibleMessageContent(candidate) &&
+									!consumedPreviousIds.has(candidate.id),
+							)
+					: undefined);
+			if (
+				message.role === "assistant" &&
+				message.status !== "streaming" &&
+				!hasVisibleMessageContent(message) &&
+				!(current && hasVisibleMessageContent(current))
+			)
+				continue;
+			const next =
+				current && hasVisibleMessageContent(current) && !hasVisibleMessageContent(message)
+					? cloneMessage(current)
+					: cloneMessage(message);
+			if (current?.durationMs !== undefined && next.durationMs === undefined) next.durationMs = current.durationMs;
+			if (current) {
+				consumedPreviousIds.add(current.id);
+				if (current.id !== next.id) next.id = current.id;
+			}
+			this.messages.set(next.id, next);
+		}
+		for (const [messageId, message] of previous) {
+			if (!consumedPreviousIds.has(messageId) && !this.messages.has(messageId))
+				this.messages.set(messageId, cloneMessage(message));
+		}
 		if (this.runtime) this.runtime.messageCount = this.messages.size;
 	}
 
@@ -1024,11 +1288,51 @@ export class DesktopApplication {
 
 	private async updateActiveConversation(patch: Partial<ConversationIndex>): Promise<void> {
 		if (!this.activeSessionId) return;
-		const session = this.conversations.find((candidate) => candidate.id === this.activeSessionId);
+		const session = this.activeConversation();
 		if (!session) return;
 		const updated = { ...session, ...patch, updatedAt: now() };
+		if (this.draftSession?.id === session.id) {
+			this.draftSession = updated;
+			return;
+		}
 		await this.options.metadata.saveConversation(updated);
 		this.conversations = await this.options.metadata.listConversations(updated.projectId);
+	}
+
+	private async promoteDraftSession(): Promise<void> {
+		if (this.draftPromotion) return this.draftPromotion;
+		this.draftPromotion = (async () => {
+			const draft = this.draftSession;
+			if (!draft || draft.id !== this.activeSessionId) return;
+			if (this.options.sessionFiles) {
+				let persisted = false;
+				for (let attempt = 0; attempt < 20; attempt += 1) {
+					if (await this.options.sessionFiles.exists(draft.sessionPath)) {
+						persisted = true;
+						break;
+					}
+					await new Promise<void>((resolve) => setTimeout(resolve, 50));
+				}
+				if (!persisted) return;
+			}
+			if (this.draftSession?.id !== draft.id || this.activeSessionId !== draft.id) return;
+			const updated = { ...draft, status: "idle" as const, updatedAt: now() };
+			await this.options.metadata.saveConversation(updated);
+			this.conversations = await this.options.metadata.listConversations(updated.projectId);
+			if (this.draftSession?.id === updated.id) this.draftSession = null;
+			if (this.runtime)
+				this.emit({
+					type: "session.changed",
+					...this.runtime,
+					sessionId: updated.id,
+					projectId: updated.projectId,
+				});
+		})();
+		try {
+			await this.draftPromotion;
+		} finally {
+			this.draftPromotion = undefined;
+		}
 	}
 
 	private handlePiEvent(event: PiAgentEvent): void {
@@ -1058,9 +1362,20 @@ export class DesktopApplication {
 					modelProvider: this.runtime.modelProvider,
 					modelId: this.runtime.modelId,
 				}).catch(() => undefined);
+				if (!this.runtime.isStreaming) {
+					void this.promoteDraftSession().catch(() => undefined);
+					void this.refreshRuntimeMessages().catch(() => undefined);
+					this.assistantStartedAt.clear();
+					this.streamingAssistantMessageId = undefined;
+					this.emit({ type: "runtime.ready", ...identity, snapshot: this.runtime });
+				}
 				break;
 			case "message_started":
 				this.messages.set(event.message.id, cloneMessage(event.message));
+				if (event.message.role === "assistant") {
+					this.streamingAssistantMessageId = event.message.id;
+					this.assistantStartedAt.set(event.message.id, performance.now());
+				}
 				this.runtime.status = "streaming";
 				this.runtime.isStreaming = true;
 				this.runtime.messageCount = this.messages.size;
@@ -1076,43 +1391,81 @@ export class DesktopApplication {
 					delta: event.delta,
 				});
 				break;
-			case "message_finished":
-				this.messages.set(event.message.id, cloneMessage(event.message));
-				this.runtime.status = "ready";
-				this.runtime.isStreaming = false;
+			case "message_finished": {
+				const completedMessage = cloneMessage(event.message);
+				const previous =
+					this.messages.get(event.message.id) ??
+					(event.message.role === "assistant" && this.streamingAssistantMessageId
+						? this.messages.get(this.streamingAssistantMessageId)
+						: undefined);
+				if (previous && previous.id !== completedMessage.id) {
+					this.messages.delete(completedMessage.id);
+					completedMessage.id = previous.id;
+				}
+				if (completedMessage.role === "assistant") {
+					const startedAt =
+						this.assistantStartedAt.get(completedMessage.id) ??
+						(previous ? this.assistantStartedAt.get(previous.id) : undefined);
+					if (startedAt !== undefined) completedMessage.durationMs = Math.max(0, performance.now() - startedAt);
+					this.assistantStartedAt.delete(completedMessage.id);
+					if (previous && previous.id !== completedMessage.id) this.assistantStartedAt.delete(previous.id);
+				}
+				if (previous && !hasVisibleMessageContent(completedMessage) && hasVisibleMessageContent(previous))
+					completedMessage.parts = previous.parts.map((part) => ({ ...part }));
+				if (
+					event.message.role === "assistant" &&
+					!hasVisibleMessageContent(completedMessage) &&
+					!(previous && hasVisibleMessageContent(previous))
+				) {
+					this.messages.delete(completedMessage.id);
+					this.runtime.messageCount = this.messages.size;
+					break;
+				}
+				this.messages.set(completedMessage.id, completedMessage);
 				this.runtime.messageCount = this.messages.size;
-				void this.updateActiveConversation({ status: "idle", updatedAt: now() }).catch(() => undefined);
-				this.emit({ type: "message.finished", ...identity, message: cloneMessage(event.message) });
+				this.emit({ type: "message.finished", ...identity, message: cloneMessage(completedMessage) });
 				break;
+			}
 			case "aborted":
+				if (event.messageId) this.assistantStartedAt.delete(event.messageId);
 				this.runtime.status = "ready";
 				this.runtime.isStreaming = false;
 				void this.updateActiveConversation({ status: "aborted" }).catch(() => undefined);
 				this.emit({ type: "message.aborted", ...identity, messageId: event.messageId });
 				break;
 			case "tool_started":
+				this.applyToolEvent(event.messageId, event.toolCallId, {
+					text: "",
+					toolName: event.toolName,
+					status: "started",
+				});
 				this.emit({
 					type: "tool.started",
 					...identity,
-					messageId: event.messageId,
+					messageId: this.resolveAssistantMessageId(event.messageId),
 					toolName: event.toolName,
 					toolCallId: event.toolCallId,
 				});
 				break;
 			case "tool_update":
+				this.applyToolEvent(event.messageId, event.toolCallId, { text: event.text, status: "updated" });
 				this.emit({
 					type: "tool.update",
 					...identity,
-					messageId: event.messageId,
+					messageId: this.resolveAssistantMessageId(event.messageId),
 					toolCallId: event.toolCallId,
 					text: event.text,
 				});
 				break;
 			case "tool_finished":
+				this.applyToolEvent(event.messageId, event.toolCallId, {
+					text: event.text,
+					status: event.failed ? "failed" : "finished",
+				});
 				this.emit({
 					type: "tool.finished",
 					...identity,
-					messageId: event.messageId,
+					messageId: this.resolveAssistantMessageId(event.messageId),
 					toolCallId: event.toolCallId,
 					text: event.text,
 					failed: event.failed,
@@ -1138,6 +1491,34 @@ export class DesktopApplication {
 		const part = message.parts.find((candidate) => candidate.type === partType);
 		if (part) part.text += delta;
 		else message.parts.push({ type: partType, text: delta });
+	}
+
+	private resolveAssistantMessageId(messageId: string): string {
+		return this.messages.has(messageId) ? messageId : (this.streamingAssistantMessageId ?? messageId);
+	}
+
+	private applyToolEvent(
+		messageId: string,
+		toolCallId: string,
+		patch: { text?: string; toolName?: string; status?: "started" | "updated" | "finished" | "failed" },
+	): void {
+		const assistantId = this.resolveAssistantMessageId(messageId);
+		const message = this.messages.get(assistantId);
+		if (!message) return;
+		const part = message.parts.find((candidate) => candidate.type === "tool" && candidate.toolCallId === toolCallId);
+		if (part && part.type === "tool") {
+			if (patch.text !== undefined) part.text = patch.text;
+			if (patch.toolName !== undefined) part.toolName = patch.toolName;
+			if (patch.status !== undefined) part.status = patch.status;
+			return;
+		}
+		message.parts.push({
+			type: "tool",
+			text: patch.text ?? "",
+			toolName: patch.toolName,
+			toolCallId,
+			status: patch.status ?? "started",
+		});
 	}
 
 	private recordDiagnostic(level: Diagnostic["level"], component: string, message: string, requestId?: string): void {

@@ -70,6 +70,7 @@ describe("Pi session file repository", () => {
 
 		expect(result.sessions).toHaveLength(1);
 		expect(result.sessions[0]?.id).toBe("valid");
+		expect(result.sessions[0]?.hasMessages).toBe(false);
 		expect(result.diagnostics).toHaveLength(1);
 		expect(result.diagnostics[0]).toContain("invalid.jsonl");
 	});

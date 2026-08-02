@@ -18,6 +18,7 @@ if (!workDirectory.startsWith(root) || !outputDirectory.startsWith(root)) throw 
 await rm(workDirectory, { recursive: true, force: true });
 await rm(outputDirectory, { recursive: true, force: true });
 await mkdir(join(appResources, "renderer"), { recursive: true });
+await mkdir(join(appResources, "extensions"), { recursive: true });
 
 const common = {
 	bundle: true,
@@ -31,11 +32,20 @@ const common = {
 await build({ ...common, entryPoints: [join(root, "apps/desktop/src/electron/main.ts")], outfile: join(workDirectory, "main.mjs"), external: ["electron"] });
 await build({ ...common, entryPoints: [join(root, "apps/desktop/src/host/main.ts")], outfile: join(appResources, "host.mjs") });
 await build({ ...common, entryPoints: [piRpcEntry], outfile: join(appResources, "rpc-entry.mjs") });
+await build({ ...common, entryPoints: [join(appDirectory, "src", "extensions", "web-search.ts")], outfile: join(appResources, "extensions", "web-search.mjs") });
 const themeDirectory = join(appResources, "dist", "modes", "interactive", "theme");
 await cp(join(piPackageDirectory, "dist", "modes", "interactive", "theme"), themeDirectory, { recursive: true });
 for (const theme of ["dark.json", "light.json"]) await access(join(themeDirectory, theme));
 await cp(join(appDirectory, "src", "renderer"), join(appResources, "renderer"), { recursive: true });
 await cp(join(root, "node_modules", "lucide", "dist", "esm"), join(appResources, "lucide"), { recursive: true });
+await cp(
+	join(piPackageDirectory, "node_modules", "@earendil-works"),
+	join(appResources, "node_modules", "@earendil-works"),
+	{ recursive: true },
+);
+await cp(join(piPackageDirectory, "node_modules", "typebox"), join(appResources, "node_modules", "typebox"), {
+	recursive: true,
+});
 await writeFile(join(workDirectory, "package.json"), JSON.stringify({
 	name: "pi-desktop",
 	version: manifest.version,

@@ -41,12 +41,24 @@ export function normalizeMessage(value: unknown): DesktopMessage {
 	const role =
 		message.role === "user" || message.role === "assistant" || message.role === "system" ? message.role : "tool";
 	const parts: MessagePart[] = [];
+	const isToolResult = message.role === "toolResult";
 	if (Array.isArray(message.content)) {
 		for (const rawPart of message.content) {
 			const part = record(rawPart);
 			if (!part) continue;
 			const type = stringValue(part.type);
-			if (type === "text") parts.push({ type: "text", text: stringValue(part.text) ?? "" });
+			if (type === "text")
+				parts.push(
+					isToolResult
+						? {
+								type: "tool",
+								text: stringValue(part.text) ?? "",
+								toolName: stringValue(message.toolName) ?? "tool",
+								toolCallId: stringValue(message.toolCallId),
+								status: message.isError === true ? "failed" : "finished",
+							}
+						: { type: "text", text: stringValue(part.text) ?? "" },
+				);
 			else if (type === "thinking") parts.push({ type: "thinking", text: stringValue(part.thinking) ?? "" });
 			else if (type === "toolCall")
 				parts.push({
@@ -54,10 +66,22 @@ export function normalizeMessage(value: unknown): DesktopMessage {
 					text: JSON.stringify(part.arguments ?? ""),
 					toolName: stringValue(part.name),
 					toolCallId: stringValue(part.id),
+					status: "started",
 				});
 		}
 	} else {
-		parts.push({ type: "text", text: textFromContent(message.content) });
+		const text = textFromContent(message.content);
+		parts.push(
+			isToolResult
+				? {
+						type: "tool",
+						text,
+						toolName: stringValue(message.toolName) ?? "tool",
+						toolCallId: stringValue(message.toolCallId),
+						status: message.isError === true ? "failed" : "finished",
+					}
+				: { type: "text", text },
+		);
 	}
 	if (parts.length === 0) parts.push({ type: "text", text: "" });
 	const stopReason = stringValue(message.stopReason);
@@ -148,30 +172,11 @@ export function normalizePiEvent(value: unknown): PiAgentEventPayload | undefine
 			failed: event.isError === true,
 		};
 	if (event.type === "agent_end" || event.type === "agent_settled")
-		return {
-			type: "state_changed",
-			state: {
-				isStreaming: false,
-				thinkingLevel: "off",
-				modelProvider: null,
-				modelId: null,
-				sessionPath: null,
-				sessionId: null,
-				messageCount: 0,
-			},
-		};
+		return { type: "state_changed", state: { isStreaming: false } };
 	if (event.type === "thinking_level_changed")
 		return {
 			type: "state_changed",
-			state: {
-				isStreaming: false,
-				thinkingLevel: normalizeThinkingLevel(event.level),
-				modelProvider: null,
-				modelId: null,
-				sessionPath: null,
-				sessionId: null,
-				messageCount: 0,
-			},
+			state: { thinkingLevel: normalizeThinkingLevel(event.level) },
 		};
 	if (event.type === "auto_retry_end" && event.success === false)
 		return { type: "error", error: stringValue(event.finalError) ?? "Pi retry failed" };
