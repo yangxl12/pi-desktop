@@ -61,6 +61,26 @@ export class MemoryMetadataRepository implements MetadataRepository {
 			.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 	}
 
+	async listConversationPage(projectId: string, limit: number, cursor?: string) {
+		const conversations = await this.listConversations(projectId);
+		const start = cursor ? Math.max(0, Number.parseInt(cursor, 10) || 0) : 0;
+		const safeLimit = Math.max(1, Math.min(200, limit));
+		const items = conversations.slice(start, start + safeLimit);
+		return { items, nextCursor: start + items.length < conversations.length ? String(start + items.length) : null };
+	}
+
+	async listAllConversations(): Promise<Record<string, ConversationIndex[]>> {
+		const result: Record<string, ConversationIndex[]> = {};
+		for (const conversation of this.conversations.values()) {
+			const bucket = result[conversation.projectId] ?? [];
+			bucket.push({ ...conversation });
+			result[conversation.projectId] = bucket;
+		}
+		for (const conversations of Object.values(result))
+			conversations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+		return result;
+	}
+
 	async saveConversation(conversation: ConversationIndex): Promise<void> {
 		this.conversations.set(conversation.id, { ...conversation });
 	}

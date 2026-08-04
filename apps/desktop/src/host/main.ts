@@ -16,6 +16,7 @@ import {
 	desktopDataDirectory,
 	PiSessionFileRepository,
 	projectSessionDirectory,
+	QueuedMetadataRepository,
 	SqliteMetadataRepository,
 } from "@earendil-works/pi-desktop-storage";
 import { exportDiagnostics } from "./diagnostics.ts";
@@ -91,7 +92,7 @@ async function main(): Promise<void> {
 	}
 	const databasePath = join(dataDirectory, "metadata.sqlite");
 	await backupBeforeMigration(databasePath);
-	const metadata = new SqliteMetadataRepository(databasePath);
+	const metadata = new QueuedMetadataRepository(new SqliteMetadataRepository(databasePath));
 	const secrets =
 		platform === "win32" || platform === "darwin"
 			? new PlatformSecretStore(dataDirectory, process.platform)

@@ -20,15 +20,52 @@ function isModelProfileDraft(value: unknown): boolean {
 		isNonEmptyString(value.displayName) &&
 		isNonEmptyString(value.baseUrl) &&
 		isNonEmptyString(value.modelId) &&
-		typeof value.enabled === "boolean"
+		typeof value.enabled === "boolean" &&
+		(value.protocol === undefined ||
+			["openai-compatible", "anthropic", "local", "custom"].includes(value.protocol as string)) &&
+		(value.credentialStrategy === undefined ||
+			["none", "api-key", "oauth", "os-secret"].includes(value.credentialStrategy as string)) &&
+		(value.capabilities === undefined || isModelCapabilities(value.capabilities))
+	);
+}
+
+function isModelCapabilities(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		typeof value.streaming === "boolean" &&
+		typeof value.toolCalling === "boolean" &&
+		typeof value.thinking === "boolean" &&
+		typeof value.multimodal === "boolean" &&
+		(value.contextWindow === undefined || (Number.isInteger(value.contextWindow) && Number(value.contextWindow) > 0))
 	);
 }
 
 function isModelProfilePatch(value: unknown): boolean {
 	if (!isRecord(value)) return false;
 	const keys = Object.keys(value);
-	if (!keys.every((key) => ["providerId", "displayName", "baseUrl", "modelId", "enabled"].includes(key))) return false;
-	return keys.every((key) => (key === "enabled" ? typeof value[key] === "boolean" : isNonEmptyString(value[key])));
+	if (
+		!keys.every((key) =>
+			[
+				"providerId",
+				"displayName",
+				"baseUrl",
+				"modelId",
+				"enabled",
+				"protocol",
+				"capabilities",
+				"credentialStrategy",
+			].includes(key),
+		)
+	)
+		return false;
+	return keys.every((key) => {
+		if (key === "enabled") return typeof value[key] === "boolean";
+		if (key === "protocol")
+			return ["openai-compatible", "anthropic", "local", "custom"].includes(value[key] as string);
+		if (key === "credentialStrategy") return ["none", "api-key", "oauth", "os-secret"].includes(value[key] as string);
+		if (key === "capabilities") return isModelCapabilities(value[key]);
+		return isNonEmptyString(value[key]);
+	});
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -128,9 +165,14 @@ export function isDesktopCommand(value: unknown): value is DesktopCommand {
 		type === "agent.abort"
 	)
 		return true;
+	if (type === "sessions.listAll") return true;
 	if (type === "projects.add") return isNonEmptyString(value.rootPath);
 	if (["projects.select", "projects.remove", "sessions.list", "sessions.rebuild"].includes(type))
-		return isNonEmptyString(value.projectId);
+		return (
+			isNonEmptyString(value.projectId) &&
+			(value.limit === undefined || (Number.isInteger(value.limit) && Number(value.limit) > 0)) &&
+			(value.cursor === undefined || isNonEmptyString(value.cursor))
+		);
 	if (type === "projects.rename") return isNonEmptyString(value.projectId) && isNonEmptyString(value.name);
 	if (type === "projects.setTrust")
 		return (

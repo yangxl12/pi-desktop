@@ -27,8 +27,10 @@ import type {
 } from "@earendil-works/pi-desktop-protocol";
 import { DesktopError, toDesktopError } from "@earendil-works/pi-desktop-protocol";
 import { DEFAULT_APP_SETTINGS } from "./memory-repository.ts";
+import { ModelGateway } from "./model-gateway.ts";
 import { normalizeModelBaseUrl } from "./models.ts";
 import { canonicalizeProjectPath, canonicalizeResourcePath, projectName } from "./paths.ts";
+import { PerformanceMetrics } from "./performance-metrics.ts";
 import type {
 	AgentEvent,
 	AgentRuntimePort,
@@ -245,6 +247,8 @@ export class DesktopApplication {
 	private draftPromotion: Promise<void> | undefined;
 	private runtime: RuntimeSnapshot | null = null;
 	private readonly runtimePort: AgentRuntimePort;
+	private readonly modelGateway: ModelGateway;
+	private readonly performance = new PerformanceMetrics();
 	private piUnsubscribe: (() => void) | undefined;
 	private mcpUnsubscribe: (() => void) | undefined;
 	private registeredShortcut: string | undefined;
@@ -255,6 +259,7 @@ export class DesktopApplication {
 		const runtimePort = options.runtimeService ?? options.pi;
 		if (!runtimePort) throw new Error("A runtime port is required");
 		this.runtimePort = runtimePort;
+		this.modelGateway = new ModelGateway(options.secrets);
 		this.piUnsubscribe = this.runtimePort.subscribe((event) => this.handleAgentEvent(event));
 		this.mcpUnsubscribe = options.mcp?.subscribe((event) => this.handleMcpEvent(event));
 	}
@@ -347,6 +352,7 @@ export class DesktopApplication {
 			consentRequests: this.consentRequests.map((request) => ({ ...request })),
 			settings: { ...this.settings, skillDirectories: [...this.settings.skillDirectories] },
 			diagnostics: this.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+			performance: this.performance.all(),
 		};
 	}
 
@@ -389,7 +395,9 @@ export class DesktopApplication {
 			case "projects.remove":
 				return this.removeProject(command.projectId);
 			case "sessions.list":
-				return this.options.metadata.listConversations(command.projectId);
+				return this.listConversationPage(command.projectId, command.limit, command.cursor);
+			case "sessions.listAll":
+				return this.listAllConversations();
 			case "sessions.create":
 				return this.createSession(command.projectId, command.title);
 			case "sessions.open":
@@ -403,7 +411,7 @@ export class DesktopApplication {
 			case "agent.getState":
 				return this.requireRuntimeState();
 			case "agent.getMessages":
-				return collapseMessages([...this.messages.values()]);
+				return this.listMessagePage(command.limit, command.cursor);
 			case "agent.prompt":
 				return this.prompt(command.text, command.queueMode ?? "prompt");
 			case "agent.retryLast":
@@ -799,7 +807,61 @@ export class DesktopApplication {
 		return this.options.metadata.listConversations(project.id);
 	}
 
+	private async listConversationPage(
+		projectId: string,
+		limit?: number,
+		cursor?: string,
+	): Promise<ConversationIndex[] | { items: ConversationIndex[]; nextCursor: string | null }> {
+		if ((limit !== undefined || cursor !== undefined) && this.options.metadata.listConversationPage) {
+			return this.options.metadata.listConversationPage(projectId, Math.max(1, Math.min(200, limit ?? 50)), cursor);
+		}
+		const conversations = await this.options.metadata.listConversations(projectId);
+		if (limit === undefined && cursor === undefined) return conversations;
+		const safeLimit = Math.max(1, Math.min(200, limit ?? 50));
+		const start = cursor ? Math.max(0, Number.parseInt(cursor, 10) || 0) : 0;
+		const items = conversations.slice(start, start + safeLimit);
+		return { items, nextCursor: start + items.length < conversations.length ? String(start + items.length) : null };
+	}
+
+	private async listAllConversations(): Promise<Record<string, ConversationIndex[]>> {
+		const startedAt = performance.now();
+		const projects = this.projects;
+		const indexed = this.options.metadata.listAllConversations
+			? await this.options.metadata.listAllConversations()
+			: (
+					await Promise.all(
+						projects.map(
+							async (project) =>
+								[project.id, await this.options.metadata.listConversations(project.id)] as const,
+						),
+					)
+				).reduce<Record<string, ConversationIndex[]>>((result, [projectId, conversations]) => {
+					result[projectId] = conversations;
+					return result;
+				}, {});
+		if (!this.activeProjectId) {
+			this.performance.record("sessions.bulk-list", startedAt);
+			return indexed;
+		}
+		indexed[this.activeProjectId] = this.conversations.map((conversation) => ({ ...conversation }));
+		this.performance.record("sessions.bulk-list", startedAt);
+		return indexed;
+	}
+
+	private listMessagePage(
+		limit?: number,
+		cursor?: string,
+	): DesktopMessage[] | { items: DesktopMessage[]; nextCursor: string | null } {
+		const messages = collapseMessages([...this.messages.values()]);
+		if (limit === undefined && cursor === undefined) return messages;
+		const safeLimit = Math.max(1, Math.min(200, limit ?? 50));
+		const start = cursor ? Math.max(0, Number.parseInt(cursor, 10) || 0) : 0;
+		const items = messages.slice(start, start + safeLimit);
+		return { items, nextCursor: start + items.length < messages.length ? String(start + items.length) : null };
+	}
+
 	private async startRuntime(project: Project, session?: ConversationIndex): Promise<void> {
+		const startedAt = performance.now();
 		await this.stopRuntime("runtime replaced");
 		const runtimeId = randomUUID();
 		const sessionId = session?.id ?? randomUUID();
@@ -840,6 +902,7 @@ export class DesktopApplication {
 				}
 			}
 			this.emit({ type: "runtime.ready", projectId: project.id, sessionId, runtimeId, snapshot: this.runtime });
+			this.performance.record("runtime.start", startedAt);
 		} catch (error: unknown) {
 			if (!this.runtime || this.runtime.runtimeId !== runtimeId) throw error;
 			this.runtime = asRuntimeSnapshot(project.id, sessionId, runtimeId, {
@@ -859,23 +922,15 @@ export class DesktopApplication {
 	}
 
 	private async buildRuntimeOptions(project: Project, session: ConversationIndex | undefined, runtimeId: string) {
-		const models: RuntimeModel[] = [];
+		const models: RuntimeModel[] = await this.modelGateway.resolveEnabled(this.models);
 		const env: Record<string, string> = {};
 		const sensitiveValues: string[] = [];
 		for (const profile of this.models.filter((candidate) => candidate.enabled)) {
-			const apiKey =
-				profile.credentialRef && this.options.secrets
-					? await this.options.secrets.get(profile.credentialRef)
-					: null;
+			const apiKey = models.find(
+				(model) => model.providerId === profile.providerId && model.modelId === profile.modelId,
+			)?.apiKey;
 			if (profile.credentialRef && !apiKey)
 				this.recordDiagnostic("warning", "credentials", `Credential for ${profile.displayName} is unavailable`);
-			models.push({
-				providerId: profile.providerId,
-				displayName: profile.displayName,
-				baseUrl: profile.baseUrl,
-				modelId: profile.modelId,
-				apiKey,
-			});
 		}
 		const defaultProfile = this.models.find(
 			(candidate) => candidate.id === this.settings.defaultModelProfileId && candidate.enabled,
@@ -1107,6 +1162,8 @@ export class DesktopApplication {
 				candidate.modelId === input.modelId.trim(),
 		);
 		if (duplicate) throw new DesktopError("CONFLICT", "A model with this provider and ID already exists");
+		if (input.protocol && !["openai-compatible", "anthropic", "local", "custom"].includes(input.protocol))
+			throw new DesktopError("INVALID_ARGUMENT", "Model protocol is invalid");
 		return {
 			...input,
 			providerId: input.providerId.trim(),
@@ -1155,6 +1212,9 @@ export class DesktopApplication {
 			displayName: patch.displayName ?? profile.displayName,
 			baseUrl: patch.baseUrl ?? profile.baseUrl,
 			modelId: patch.modelId ?? profile.modelId,
+			protocol: patch.protocol ?? profile.protocol,
+			capabilities: patch.capabilities ?? profile.capabilities,
+			credentialStrategy: patch.credentialStrategy ?? profile.credentialStrategy,
 			enabled: patch.enabled ?? profile.enabled,
 		});
 		let credentialRef = profile.credentialRef;
@@ -1299,6 +1359,7 @@ export class DesktopApplication {
 	}
 
 	private async refreshRuntimeMessages(): Promise<void> {
+		const startedAt = performance.now();
 		const previousMessages = collapseMessages([...this.messages.values()]);
 		const previous = new Map(previousMessages.map((message) => [message.id, message]));
 		const messages = collapseMessages(await this.requireRuntime().getMessages());
@@ -1346,6 +1407,7 @@ export class DesktopApplication {
 				this.messages.set(messageId, cloneMessage(message));
 		}
 		if (this.runtime) this.runtime.messageCount = this.messages.size;
+		this.performance.record("session.messages-read", startedAt);
 	}
 
 	private async refreshCommands(): Promise<void> {

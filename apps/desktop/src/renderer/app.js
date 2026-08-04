@@ -12,6 +12,7 @@ let eventSource;
 let fallbackRefreshTimer;
 let refreshTimer;
 let renderFrame;
+const pendingMessageIds = new Set();
 let durationTicker;
 let sessionsByProject = new Map();
 const collapsedProjects = new Set();
@@ -448,10 +449,11 @@ function startDurationTicker() {
 	durationTicker = setInterval(() => {
 		if (!desktopState?.runtime?.isStreaming) {
 			clearInterval(durationTicker);
-			durationTicker = undefined;
+			 durationTicker = undefined;
 			return;
 		}
-		scheduleRender();
+		const activeMessage = desktopState.messages.find((message) => message.role === "assistant" && message.status === "streaming");
+		scheduleRender(activeMessage?.id);
 	}, 250);
 }
 
@@ -536,6 +538,45 @@ function renderActivityPart(part) {
 	return `<div class="activity-entry tool-entry ${state}"><span class="activity-label">${escapeHtml(part.toolName ?? t("message.tool"))}</span><div>${renderMarkdown(part.text)}</div></div>`;
 }
 
+function renderMessageHtml(message) {
+	const isUser = message.role === "user";
+	const errorPart = message.parts.find((part) => part.type === "error");
+	const content = message.parts.filter((part) => part.type === "text").map((part) => part.text).join("");
+	const activity = message.parts.filter((part) => part.type === "thinking" || part.type === "tool").map(renderActivityPart).join("");
+	const open = reasoningOpen.get(message.id) ?? true;
+	const duration = formatDuration(message.durationMs ?? responseDurations.get(message.id) ?? (responseStartedAt.has(message.id) ? performance.now() - responseStartedAt.get(message.id) : message.status === "streaming" ? Math.max(0, Date.now() - Date.parse(message.createdAt)) : message.role === "assistant" && message.status === "finished" ? 0 : NaN));
+	if (isUser) {
+		return `<article class="message user" data-message-id="${escapeHtml(message.id)}">
+			${content ? `<div class="message-body markdown-body">${renderMarkdown(content)}</div>` : ""}
+			<div class="message-meta"><button data-action="copy-message" data-message-id="${escapeHtml(message.id)}" title="${t("message.copy")}" aria-label="${t("message.copy")}"><span data-icon="copy"></span></button><time datetime="${escapeHtml(message.createdAt)}">${new Date(message.createdAt).toLocaleTimeString(desktopState.settings.locale, { hour: "2-digit", minute: "2-digit" })}</time></div>
+		</article>`;
+	}
+	if (message.status === "error" || errorPart) {
+		return `<article class="message assistant" data-message-id="${escapeHtml(message.id)}"><div class="message-error">${renderMarkdown(errorPart?.text ?? content)}</div></article>`;
+	}
+	if (!content && !activity && message.status !== "streaming") return "";
+	const status = message.status === "streaming" ? t("message.processing") : t("message.processed");
+	return `<article class="message assistant" data-message-id="${escapeHtml(message.id)}">
+		<details class="message-activity" data-reasoning-id="${escapeHtml(message.id)}" ${open ? "open" : ""}><summary><span class="activity-toggle" data-icon="chevron-right"></span><span class="activity-status">${escapeHtml(status)}</span>${duration ? `<time class="activity-duration" datetime="${escapeHtml(message.createdAt)}">${escapeHtml(duration)}</time>` : ""}</summary>${activity ? `<blockquote>${activity}</blockquote>` : ""}</details>
+		${content ? `<div class="message-body markdown-body">${renderMarkdown(content)}</div><div class="message-meta assistant-meta"><button data-action="copy-message" data-message-id="${escapeHtml(message.id)}" title="${t("message.copy")}" aria-label="${t("message.copy")}"><span data-icon="copy"></span></button><time datetime="${escapeHtml(message.createdAt)}">${new Date(message.createdAt).toLocaleTimeString(desktopState.settings.locale, { hour: "2-digit", minute: "2-digit" })}</time></div>` : ""}
+	</article>`;
+}
+
+function updateMessageNode(messageId) {
+	const container = byId("messages");
+	const message = collapseAssistantMessages(desktopState.messages).find((candidate) => candidate.id === messageId);
+	const existing = container.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
+	if (!message || !existing) return false;
+	const html = renderMessageHtml(message);
+	if (!html) {
+		existing.remove();
+		return true;
+	}
+	existing.outerHTML = html;
+	hydrateIcons(container.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`) ?? container);
+	return true;
+}
+
 function renderMessages() {
 	const container = byId("messages");
 	const shouldStickToBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 72;
@@ -548,29 +589,7 @@ function renderMessages() {
 		container.innerHTML = `<div class="conversation-column"><div class="empty-state"><h1>${t("session.new")}</h1><p>${t("message.empty")}</p></div></div>`;
 		return;
 	}
-	const messageHtml = collapseAssistantMessages(desktopState.messages).map((message) => {
-		const isUser = message.role === "user";
-		const errorPart = message.parts.find((part) => part.type === "error");
-		const content = message.parts.filter((part) => part.type === "text").map((part) => part.text).join("");
-		const activity = message.parts.filter((part) => part.type === "thinking" || part.type === "tool").map(renderActivityPart).join("");
-		const open = reasoningOpen.get(message.id) ?? true;
-		const duration = formatDuration(message.durationMs ?? responseDurations.get(message.id) ?? (responseStartedAt.has(message.id) ? performance.now() - responseStartedAt.get(message.id) : message.status === "streaming" ? Math.max(0, Date.now() - Date.parse(message.createdAt)) : message.role === "assistant" && message.status === "finished" ? 0 : NaN));
-		if (isUser) {
-			return `<article class="message user" data-message-id="${escapeHtml(message.id)}">
-				${content ? `<div class="message-body markdown-body">${renderMarkdown(content)}</div>` : ""}
-				<div class="message-meta"><button data-action="copy-message" data-message-id="${escapeHtml(message.id)}" title="${t("message.copy")}" aria-label="${t("message.copy")}"><span data-icon="copy"></span></button><time datetime="${escapeHtml(message.createdAt)}">${new Date(message.createdAt).toLocaleTimeString(desktopState.settings.locale, { hour: "2-digit", minute: "2-digit" })}</time></div>
-			</article>`;
-		}
-		if (message.status === "error" || errorPart) {
-			return `<article class="message assistant" data-message-id="${escapeHtml(message.id)}"><div class="message-error">${renderMarkdown(errorPart?.text ?? content)}</div></article>`;
-		}
-		if (!content && !activity && message.status !== "streaming") return "";
-		const status = message.status === "streaming" ? t("message.processing") : t("message.processed");
-		return `<article class="message assistant" data-message-id="${escapeHtml(message.id)}">
-			<details class="message-activity" data-reasoning-id="${escapeHtml(message.id)}" ${open ? "open" : ""}><summary><span class="activity-toggle" data-icon="chevron-right"></span><span class="activity-status">${escapeHtml(status)}</span>${duration ? `<time class="activity-duration" datetime="${escapeHtml(message.createdAt)}">${escapeHtml(duration)}</time>` : ""}</summary>${activity ? `<blockquote>${activity}</blockquote>` : ""}</details>
-			${content ? `<div class="message-body markdown-body">${renderMarkdown(content)}</div><div class="message-meta assistant-meta"><button data-action="copy-message" data-message-id="${escapeHtml(message.id)}" title="${t("message.copy")}" aria-label="${t("message.copy")}"><span data-icon="copy"></span></button><time datetime="${escapeHtml(message.createdAt)}">${new Date(message.createdAt).toLocaleTimeString(desktopState.settings.locale, { hour: "2-digit", minute: "2-digit" })}</time></div>` : ""}
-		</article>`;
-	}).filter(Boolean).join("");
+	const messageHtml = collapseAssistantMessages(desktopState.messages).map(renderMessageHtml).filter(Boolean).join("");
 	container.innerHTML = `<div class="conversation-column">${messageHtml}</div>`;
 	hydrateIcons(container);
 	if (shouldStickToBottom) container.scrollTop = container.scrollHeight;
@@ -714,15 +733,18 @@ function render() {
 }
 
 async function refreshProjectSessions() {
-	const entries = await Promise.all(desktopState.projects.map(async (project) => {
-		if (project.id === desktopState.activeProjectId) return [project.id, desktopState.conversations];
-		try {
-			return [project.id, await command({ type: "sessions.list", projectId: project.id })];
-		} catch {
-			return [project.id, []];
-		}
-	}));
-	sessionsByProject = new Map(entries);
+	try {
+		const all = await command({ type: "sessions.listAll" });
+		sessionsByProject = new Map(Object.entries(all ?? {}));
+		if (desktopState.activeProjectId) sessionsByProject.set(desktopState.activeProjectId, desktopState.conversations);
+	} catch {
+		// Keep compatibility with hosts from the pre-bulk-list protocol.
+		const entries = await Promise.all(desktopState.projects.map(async (project) => {
+			if (project.id === desktopState.activeProjectId) return [project.id, desktopState.conversations];
+			try { return [project.id, await command({ type: "sessions.list", projectId: project.id })]; } catch { return [project.id, []]; }
+		}));
+		sessionsByProject = new Map(entries);
+	}
 }
 
 async function refresh(includeProjectSessions = true) {
@@ -745,13 +767,16 @@ function scheduleRefresh(includeProjectSessions = false) {
 	refreshTimer = setTimeout(() => void refresh(includeProjectSessions), 40);
 }
 
-function scheduleRender() {
+function scheduleRender(messageId) {
+	if (messageId) pendingMessageIds.add(messageId);
 	if (renderFrame !== undefined) return;
 	renderFrame = requestAnimationFrame(() => {
 		renderFrame = undefined;
 		if (!desktopState || settingsOpen) return;
 		renderHeader();
-		renderMessages();
+		const ids = [...pendingMessageIds];
+		pendingMessageIds.clear();
+		if (ids.length === 0 || ids.some((id) => !updateMessageNode(id))) renderMessages();
 		renderComposer();
 	});
 }
@@ -795,7 +820,7 @@ function applyDesktopEvent(event) {
 			desktopState.runtime.status = "streaming";
 			desktopState.runtime.isStreaming = true;
 		}
-		scheduleRender();
+		scheduleRender(message.id);
 		return true;
 	}
 	if (event.type === "message.delta") {
@@ -812,7 +837,7 @@ function applyDesktopEvent(event) {
 			desktopState.runtime.status = "streaming";
 			desktopState.runtime.isStreaming = true;
 		}
-		scheduleRender();
+		scheduleRender(message.id);
 		return true;
 	}
 	if (event.type === "message.finished") {
@@ -827,7 +852,7 @@ function applyDesktopEvent(event) {
 		if (existingIndex >= 0) desktopState.messages[existingIndex] = message;
 		else desktopState.messages.push(message);
 		if (!desktopState.runtime?.isStreaming) stopDurationTicker();
-		scheduleRender();
+		scheduleRender(message?.id);
 		return true;
 	}
 	if (event.type === "message.aborted") {
@@ -879,7 +904,7 @@ function applyDesktopEvent(event) {
 			} else {
 				message.parts.push({ type: "tool", text: event.type === "tool.started" ? "" : event.text, toolName: event.toolName, toolCallId: event.toolCallId, status: event.type === "tool.finished" ? (event.failed ? "failed" : "finished") : event.type === "tool.update" ? "updated" : "started" });
 			}
-			scheduleRender();
+			scheduleRender(message.id);
 		} else scheduleRefresh(false);
 		return true;
 	}

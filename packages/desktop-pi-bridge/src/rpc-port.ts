@@ -47,7 +47,8 @@ function safeEnvironmentName(providerId: string): string {
 	return providerId.replace(/[^A-Za-z0-9_]/g, "_").toUpperCase();
 }
 
-function buildModelsJson(options: PiRuntimeOptions): {
+/** Translate the runtime-neutral Model Gateway output to Pi's models.json. */
+export function buildPiModelsJson(options: PiRuntimeOptions): {
 	content: string;
 	env: Record<string, string>;
 	secrets: string[];
@@ -76,7 +77,7 @@ function buildModelsJson(options: PiRuntimeOptions): {
 			id: model.modelId,
 			name: model.displayName,
 			baseUrl: model.baseUrl === provider.baseUrl ? undefined : model.baseUrl,
-			reasoning: true,
+			reasoning: model.capabilities?.thinking !== false,
 		});
 		if (model.apiKey) secrets.push(model.apiKey);
 		env[environmentName] = model.apiKey ?? "pi-desktop-local";
@@ -115,7 +116,7 @@ export class RpcPiAgentPort implements PiAgentPort {
 		await this.stop();
 		this.runtimeOptions = options;
 		this.tools = [...(options.tools ?? [])];
-		const modelConfig = buildModelsJson(options);
+		const modelConfig = buildPiModelsJson(options);
 		this.sensitiveValues = modelConfig.secrets;
 		await mkdir(options.agentDirectory, { recursive: true, mode: 0o700 });
 		await mkdir(options.sessionDirectory, { recursive: true, mode: 0o700 });

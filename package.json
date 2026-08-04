@@ -5,7 +5,8 @@
 	"type": "module",
 	"workspaces": ["apps/*", "packages/*"],
 	"scripts": {
-		"check": "biome check --write --error-on-warnings . && tsgo --noEmit",
+		"check": "npm run check:decoupling && biome check --write --error-on-warnings . && tsgo --noEmit",
+		"check:decoupling": "node scripts/check-pi-decoupling.mjs",
 		"test:desktop-core": "npm run test --workspace=@earendil-works/pi-desktop-core",
 		"test:desktop-mcp": "npm run test --workspace=@earendil-works/pi-desktop-mcp",
 		"test:desktop-pi-bridge": "npm run test --workspace=@earendil-works/pi-desktop-pi-bridge",

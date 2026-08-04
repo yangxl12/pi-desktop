@@ -1,6 +1,8 @@
 import type {
 	DesktopMessage,
 	Diagnostic,
+	ModelCapabilities,
+	ModelCredentialStrategy,
 	RuntimeCapabilities,
 	RuntimeSessionRef,
 	SkillCommand,
@@ -36,7 +38,8 @@ export interface RuntimeModel {
 	modelId: string;
 	apiKey: string | null;
 	protocol?: string;
-	capabilities?: Partial<RuntimeCapabilities>;
+	capabilities?: ModelCapabilities;
+	credentialStrategy?: ModelCredentialStrategy;
 }
 
 export interface RuntimeStartOptions {

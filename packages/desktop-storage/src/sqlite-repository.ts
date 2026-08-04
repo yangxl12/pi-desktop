@@ -47,6 +47,9 @@ interface ModelRow {
 	base_url: string;
 	model_id: string;
 	credential_ref: string | null;
+	protocol: ModelProfile["protocol"] | null;
+	capabilities_json: string | null;
+	credential_strategy: ModelProfile["credentialStrategy"] | null;
 	enabled: number;
 	created_at: string;
 	updated_at: string;
@@ -98,6 +101,11 @@ function modelFromRow(row: ModelRow): ModelProfile {
 		baseUrl: row.base_url,
 		modelId: row.model_id,
 		credentialRef: row.credential_ref,
+		protocol: row.protocol ?? undefined,
+		capabilities: row.capabilities_json
+			? (JSON.parse(row.capabilities_json) as ModelProfile["capabilities"])
+			: undefined,
+		credentialStrategy: row.credential_strategy ?? undefined,
 		enabled: row.enabled === 1,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
@@ -158,6 +166,9 @@ export class SqliteMetadataRepository implements MetadataRepository {
 					base_url TEXT NOT NULL,
 					model_id TEXT NOT NULL,
 					credential_ref TEXT,
+					protocol TEXT,
+					capabilities_json TEXT,
+					credential_strategy TEXT,
 					enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
 					created_at TEXT NOT NULL,
 					updated_at TEXT NOT NULL,
@@ -187,12 +198,28 @@ export class SqliteMetadataRepository implements MetadataRepository {
 				if (!conversationColumns.has(name))
 					this.database.exec(`ALTER TABLE conversations ADD COLUMN ${name} ${definition}`);
 			}
+			const modelColumns = new Set(
+				(this.database.prepare("PRAGMA table_info(model_profiles)").all() as Array<{ name: string }>).map(
+					(column) => column.name,
+				),
+			);
+			for (const [name, definition] of [
+				["protocol", "TEXT"],
+				["capabilities_json", "TEXT"],
+				["credential_strategy", "TEXT"],
+			] as const) {
+				if (!modelColumns.has(name))
+					this.database.exec(`ALTER TABLE model_profiles ADD COLUMN ${name} ${definition}`);
+			}
 			this.database
 				.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)")
 				.run(1, new Date().toISOString());
 			this.database
 				.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)")
 				.run(2, new Date().toISOString());
+			this.database
+				.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+				.run(3, new Date().toISOString());
 			this.database.exec("COMMIT");
 		} catch (error: unknown) {
 			this.database.exec("ROLLBACK");
@@ -262,6 +289,36 @@ export class SqliteMetadataRepository implements MetadataRepository {
 		).map(conversationFromRow);
 	}
 
+	async listConversationPage(projectId: string, limit: number, cursor?: string) {
+		const safeLimit = Math.max(1, Math.min(200, limit));
+		const offset = cursor ? Math.max(0, Number.parseInt(cursor, 10) || 0) : 0;
+		const rows = this.database
+			.prepare("SELECT * FROM conversations WHERE project_id = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?")
+			.all(projectId, safeLimit, offset) as unknown as ConversationRow[];
+		const items = rows.map(conversationFromRow);
+		const total = Number(
+			(
+				this.database
+					.prepare("SELECT COUNT(*) AS count FROM conversations WHERE project_id = ?")
+					.get(projectId) as { count: number }
+			).count,
+		);
+		return { items, nextCursor: offset + items.length < total ? String(offset + items.length) : null };
+	}
+
+	async listAllConversations(): Promise<Record<string, ConversationIndex[]>> {
+		const rows = this.database
+			.prepare("SELECT * FROM conversations ORDER BY project_id, updated_at DESC")
+			.all() as unknown as ConversationRow[];
+		const result: Record<string, ConversationIndex[]> = {};
+		for (const row of rows) {
+			const bucket = result[row.project_id] ?? [];
+			bucket.push(conversationFromRow(row));
+			result[row.project_id] = bucket;
+		}
+		return result;
+	}
+
 	async saveConversation(conversation: ConversationIndex): Promise<void> {
 		this.database
 			.prepare(`
@@ -319,14 +376,18 @@ export class SqliteMetadataRepository implements MetadataRepository {
 		this.database
 			.prepare(`
 				INSERT INTO model_profiles(
-					id, provider_id, display_name, base_url, model_id, credential_ref, enabled, created_at, updated_at
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+					id, provider_id, display_name, base_url, model_id, credential_ref, protocol, capabilities_json,
+					credential_strategy, enabled, created_at, updated_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(id) DO UPDATE SET
 					provider_id = excluded.provider_id,
 					display_name = excluded.display_name,
 					base_url = excluded.base_url,
 					model_id = excluded.model_id,
 					credential_ref = excluded.credential_ref,
+					protocol = excluded.protocol,
+					capabilities_json = excluded.capabilities_json,
+					credential_strategy = excluded.credential_strategy,
 					enabled = excluded.enabled,
 					updated_at = excluded.updated_at
 			`)
@@ -337,6 +398,9 @@ export class SqliteMetadataRepository implements MetadataRepository {
 				profile.baseUrl,
 				profile.modelId,
 				profile.credentialRef,
+				profile.protocol ?? null,
+				profile.capabilities ? JSON.stringify(profile.capabilities) : null,
+				profile.credentialStrategy ?? null,
 				profile.enabled ? 1 : 0,
 				profile.createdAt,
 				profile.updatedAt,

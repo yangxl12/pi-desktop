@@ -15,6 +15,7 @@
 		"package:sidecar": "node scripts/package-sidecar.mjs",
 		"package:manifest": "node scripts/write-release-manifest.mjs",
 		"package:windows": "node scripts/build-windows-installer.mjs",
+		"migrate:sessions": "tsx scripts/session-migration.ts",
 		"release:preflight": "node scripts/release-preflight.mjs",
 		"test": "vitest --run test"
 	},

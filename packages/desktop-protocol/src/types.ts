@@ -162,6 +162,9 @@ export interface ModelProfile {
 	baseUrl: string;
 	modelId: string;
 	credentialRef: string | null;
+	protocol?: ModelProtocol;
+	capabilities?: ModelCapabilities;
+	credentialStrategy?: ModelCredentialStrategy;
 	enabled: boolean;
 	createdAt: string;
 	updatedAt: string;
@@ -170,6 +173,35 @@ export interface ModelProfile {
 export type ModelProfileDraft = Omit<ModelProfile, "id" | "credentialRef" | "createdAt" | "updatedAt">;
 
 export type ModelProfilePatch = Partial<ModelProfileDraft>;
+
+export type ModelProtocol = "openai-compatible" | "anthropic" | "local" | "custom";
+
+export type ModelCredentialStrategy = "none" | "api-key" | "oauth" | "os-secret";
+
+export interface ModelCapabilities {
+	contextWindow?: number;
+	streaming: boolean;
+	toolCalling: boolean;
+	thinking: boolean;
+	multimodal: boolean;
+}
+
+export interface ConversationPage {
+	items: ConversationIndex[];
+	nextCursor: string | null;
+}
+
+export interface MessagePage {
+	items: DesktopMessage[];
+	nextCursor: string | null;
+}
+
+export interface PerformanceSnapshot {
+	count: number;
+	lastMs: number | null;
+	averageMs: number | null;
+	p95Ms: number | null;
+}
 
 export interface ModelConnectionResult {
 	ok: boolean;
@@ -264,4 +296,5 @@ export interface DesktopState {
 	consentRequests: McpConsentRequest[];
 	settings: AppSettings;
 	diagnostics: Diagnostic[];
+	performance?: Record<string, PerformanceSnapshot>;
 }

@@ -38,14 +38,15 @@ export type DesktopCommandBase =
 	| { type: "projects.rename"; projectId: string; name: string }
 	| { type: "projects.setTrust"; projectId: string; trustState: TrustState }
 	| { type: "projects.remove"; projectId: string }
-	| { type: "sessions.list"; projectId: string }
+	| { type: "sessions.list"; projectId: string; limit?: number; cursor?: string }
+	| { type: "sessions.listAll" }
 	| { type: "sessions.create"; projectId: string; title?: string }
 	| { type: "sessions.open"; sessionId: string }
 	| { type: "sessions.rename"; sessionId: string; title: string }
 	| { type: "sessions.refresh"; sessionId: string }
 	| { type: "sessions.rebuild"; projectId: string }
 	| { type: "agent.getState" }
-	| { type: "agent.getMessages" }
+	| { type: "agent.getMessages"; limit?: number; cursor?: string }
 	| { type: "agent.prompt"; text: string; queueMode?: QueueMode }
 	| { type: "agent.retryLast" }
 	| { type: "agent.abort" }
@@ -94,8 +95,11 @@ export type DesktopCommandResult =
 	| Project[]
 	| Project
 	| ConversationIndex[]
+	| import("./types.ts").ConversationPage
+	| Record<string, ConversationIndex[]>
 	| ConversationIndex
 	| DesktopMessage[]
+	| import("./types.ts").MessagePage
 	| ModelProfile[]
 	| ModelProfile
 	| ModelConnectionResult

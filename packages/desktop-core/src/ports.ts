@@ -1,6 +1,7 @@
 import type {
 	AppSettings,
 	ConversationIndex,
+	ConversationPage,
 	DesktopEventListener,
 	DesktopMessage,
 	Diagnostic,
@@ -116,6 +117,9 @@ export interface MetadataRepository {
 	saveProject(project: Project): Promise<void>;
 	deleteProject(projectId: string): Promise<void>;
 	listConversations(projectId: string): Promise<ConversationIndex[]>;
+	listConversationPage?(projectId: string, limit: number, cursor?: string): Promise<ConversationPage>;
+	/** Optional bulk read used to avoid renderer-side project/session N+1 calls. */
+	listAllConversations?(): Promise<Record<string, ConversationIndex[]>>;
 	saveConversation(conversation: ConversationIndex): Promise<void>;
 	deleteConversation(sessionId: string): Promise<void>;
 	listModels(): Promise<ModelProfile[]>;
