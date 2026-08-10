@@ -2,7 +2,7 @@ import { mkdtemp, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { DesktopApplication, FakeAgentRuntime, MemoryMetadataRepository } from "../src/index.ts";
+import { DesktopApplication, FakeAgentRuntime, MemoryMetadataRepository, MemorySecretStore } from "../src/index.ts";
 import type { DesktopHostPorts } from "../src/ports.ts";
 import type { RuntimeStartOptions, RuntimeState } from "../src/runtime-contract.ts";
 
@@ -273,5 +273,156 @@ describe("desktop application", () => {
 		expect(app.getState().runtime?.thinkingLevel).toBe("low");
 		await app.dispatch({ type: "sessions.create", projectId: app.getState().activeProjectId ?? "" });
 		expect(app.getState().runtime?.thinkingLevel).toBe("medium");
+	});
+
+	it("auto-enables DeepSeek built-in search when the active model is DeepSeek", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-desktop-"));
+		const metadata = new MemoryMetadataRepository();
+		const secrets = new MemorySecretStore();
+		const credentialRef = await secrets.set("sk-deepseek-1");
+		await metadata.saveModel({
+			id: "model-ds",
+			providerId: "deepseek",
+			displayName: "DeepSeek",
+			baseUrl: "https://api.deepseek.com",
+			modelId: "deepseek-v4-flash",
+			credentialRef,
+			enabled: true,
+			createdAt: "2026-08-01T00:00:00.000Z",
+			updatedAt: "2026-08-01T00:00:00.000Z",
+		});
+		const runtime = new RecordingRuntime();
+		const app = new DesktopApplication({
+			platform: "win32",
+			ports: ports(),
+			pi: runtime,
+			metadata,
+			secrets,
+			webSearchExtensionPath: "C:\\extensions\\web-search.ts",
+		});
+		await app.initialize();
+		await app.dispatch({ type: "projects.add", rootPath: root });
+		const start = runtime.starts.at(-1);
+		expect(start?.extensionPaths).toEqual(["C:\\extensions\\web-search.ts"]);
+		expect(start?.env).toEqual(
+			expect.objectContaining({
+				PI_DESKTOP_WEB_SEARCH_PROVIDER: "deepseek",
+				PI_DESKTOP_WEB_SEARCH_DEEPSEEK_BASE_URL: "https://api.deepseek.com",
+				PI_DESKTOP_WEB_SEARCH_DEEPSEEK_MODEL: "deepseek-v4-flash",
+				PI_DESKTOP_WEB_SEARCH_DEEPSEEK_API_KEY: "sk-deepseek-1",
+			}),
+		);
+		expect(start?.sensitiveValues).toContain("sk-deepseek-1");
+	});
+
+	it("detects DeepSeek models by base URL and skips non-DeepSeek models", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-desktop-"));
+		const metadata = new MemoryMetadataRepository();
+		const secrets = new MemorySecretStore();
+		const deepseekRef = await secrets.set("sk-deepseek-2");
+		await metadata.saveModel({
+			id: "model-custom-ds",
+			providerId: "my-gateway",
+			displayName: "DeepSeek via gateway",
+			baseUrl: "https://api.deepseek.com/",
+			modelId: "deepseek-v4-flash",
+			credentialRef: deepseekRef,
+			enabled: true,
+			createdAt: "2026-08-01T00:00:00.000Z",
+			updatedAt: "2026-08-01T00:00:00.000Z",
+		});
+		const deepseekRuntime = new RecordingRuntime();
+		const deepseekApp = new DesktopApplication({
+			platform: "win32",
+			ports: ports(),
+			pi: deepseekRuntime,
+			metadata,
+			secrets,
+			webSearchExtensionPath: "C:\\extensions\\web-search.ts",
+		});
+		await deepseekApp.initialize();
+		await deepseekApp.dispatch({ type: "projects.add", rootPath: root });
+		expect(deepseekRuntime.starts.at(-1)?.env.PI_DESKTOP_WEB_SEARCH_PROVIDER).toBe("deepseek");
+		expect(deepseekRuntime.starts.at(-1)?.env.PI_DESKTOP_WEB_SEARCH_DEEPSEEK_BASE_URL).toBe(
+			"https://api.deepseek.com",
+		);
+	});
+
+	it("keeps web search disabled for non-DeepSeek models", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-desktop-"));
+		const metadata = new MemoryMetadataRepository();
+		await metadata.saveModel({
+			id: "model-openai",
+			providerId: "openai",
+			displayName: "OpenAI",
+			baseUrl: "https://api.openai.com/v1",
+			modelId: "gpt-5.5",
+			credentialRef: null,
+			enabled: true,
+			createdAt: "2026-08-01T00:00:00.000Z",
+			updatedAt: "2026-08-01T00:00:00.000Z",
+		});
+		const runtime = new RecordingRuntime();
+		const app = new DesktopApplication({
+			platform: "win32",
+			ports: ports(),
+			pi: runtime,
+			metadata,
+			webSearchExtensionPath: "C:\\extensions\\web-search.ts",
+		});
+		await app.initialize();
+		await app.dispatch({ type: "projects.add", rootPath: root });
+		const start = runtime.starts.at(-1);
+		expect(start?.env.PI_DESKTOP_WEB_SEARCH_PROVIDER).toBeUndefined();
+		expect(start?.env.BRAVE_SEARCH_API_KEY).toBeUndefined();
+		expect(start?.env.TAVILY_API_KEY).toBeUndefined();
+		expect(start?.extensionPaths).toEqual([]);
+	});
+
+	it("keeps an explicit Brave provider even when a DeepSeek model is active", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-desktop-"));
+		const metadata = new MemoryMetadataRepository();
+		const secrets = new MemorySecretStore();
+		const deepseekRef = await secrets.set("sk-deepseek-3");
+		await metadata.saveModel({
+			id: "model-ds",
+			providerId: "deepseek",
+			displayName: "DeepSeek",
+			baseUrl: "https://api.deepseek.com",
+			modelId: "deepseek-v4-flash",
+			credentialRef: deepseekRef,
+			enabled: true,
+			createdAt: "2026-08-01T00:00:00.000Z",
+			updatedAt: "2026-08-01T00:00:00.000Z",
+		});
+		const runtime = new RecordingRuntime();
+		const app = new DesktopApplication({
+			platform: "win32",
+			ports: ports(),
+			pi: runtime,
+			metadata,
+			secrets,
+			webSearchExtensionPath: "C:\\extensions\\web-search.ts",
+		});
+		await app.initialize();
+		await app.dispatch({ type: "webSearch.update", provider: "brave", apiKey: "bsk-brave-1" });
+		await app.dispatch({ type: "projects.add", rootPath: root });
+		const start = runtime.starts.at(-1);
+		expect(start?.env.BRAVE_SEARCH_API_KEY).toBe("bsk-brave-1");
+		expect(start?.env.PI_DESKTOP_WEB_SEARCH_PROVIDER).toBeUndefined();
+		expect(start?.extensionPaths).toEqual(["C:\\extensions\\web-search.ts"]);
+	});
+
+	it("accepts the DeepSeek provider without a stored credential", async () => {
+		const app = new DesktopApplication({
+			platform: "win32",
+			ports: ports(),
+			pi: new FakeAgentRuntime(),
+			metadata: new MemoryMetadataRepository(),
+		});
+		await app.initialize();
+		const response = await app.dispatch({ type: "webSearch.update", provider: "deepseek" });
+		expect(response.success).toBe(true);
+		expect(app.getState().settings.webSearch).toEqual({ provider: "deepseek", credentialRef: null });
 	});
 });

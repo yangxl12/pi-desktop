@@ -216,7 +216,7 @@ export function isDesktopCommand(value: unknown): value is DesktopCommand {
 	if (type === "settings.reset") return isNonEmptyString(value.key);
 	if (type === "webSearch.update")
 		return (
-			["disabled", "brave", "tavily"].includes(value.provider as string) &&
+			["disabled", "brave", "tavily", "deepseek"].includes(value.provider as string) &&
 			isOptionalString(value.apiKey) &&
 			(value.clearCredential === undefined || typeof value.clearCredential === "boolean")
 		);

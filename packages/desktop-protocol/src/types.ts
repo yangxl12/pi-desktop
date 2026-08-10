@@ -33,7 +33,7 @@ export type AppLocale = "zh-CN" | "en";
 
 export type AppTheme = "light" | "dark";
 
-export type WebSearchProvider = "disabled" | "brave" | "tavily";
+export type WebSearchProvider = "disabled" | "brave" | "tavily" | "deepseek";
 
 export type McpTransport = "stdio" | "http";
 

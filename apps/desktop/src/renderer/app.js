@@ -79,6 +79,8 @@ const translations = {
 		"settings.closeToTray": "关闭窗口时保留在系统托盘",
 		"settings.webSearch": "联网搜索",
 		"settings.provider": "搜索服务",
+		"settings.webSearchDeepseek": "DeepSeek 内置搜索",
+		"settings.webSearchDeepseekHint": "使用当前 DeepSeek 模型的密钥，无需额外 API 密钥",
 		"settings.apiKey": "API 密钥",
 		"settings.apiKeyStored": "密钥已安全保存，留空则保持不变",
 		"settings.save": "保存",
@@ -230,6 +232,8 @@ const translations = {
 		"settings.closeToTray": "Keep Pi Desktop in the system tray when the window closes",
 		"settings.webSearch": "Web search",
 		"settings.provider": "Search provider",
+		"settings.webSearchDeepseek": "DeepSeek built-in search",
+		"settings.webSearchDeepseekHint": "Uses the active DeepSeek model credential; no extra API key needed",
 		"settings.apiKey": "API key",
 		"settings.apiKeyStored": "Stored securely; leave blank to keep",
 		"settings.save": "Save",
@@ -736,7 +740,7 @@ function renderGeneralSettings(content) {
 		<div class="settings-card"><h3>${t("settings.defaultThinking")}</h3><form id="default-thinking-form"><label class="form-field"><select name="defaultThinkingLevel">${["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((level) => `<option value="${level}" ${desktopState.settings.defaultThinkingLevel === level ? "selected" : ""}>${t(`thinking.${level}`)}</option>`).join("")}</select></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
 		<div class="settings-card"><h3>${t("settings.globalPrompt")}</h3><form id="global-prompt-form"><label class="form-field"><textarea name="globalSystemPrompt">${escapeHtml(desktopState.settings.globalSystemPrompt)}</textarea></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
 		<div class="settings-card"><h3>${t("settings.shortcut")}</h3><form id="shortcut-form" class="form-grid"><label class="form-field full"><input name="invokeShortcut" data-shortcut-recorder value="${escapeHtml(desktopState.settings.invokeShortcut)}"></label><div class="form-actions full"><button class="text-button" type="button" data-action="reset-shortcut"><span data-icon="rotate-ccw"></span> ${t("settings.reset")}</button><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
-		<div class="settings-card"><h3>${t("settings.webSearch")}</h3><form id="web-search-form" class="form-grid"><label class="form-field"><span>${t("settings.provider")}</span><select name="provider"><option value="disabled" ${webSearch.provider === "disabled" ? "selected" : ""}>${t("settings.disabled")}</option><option value="brave" ${webSearch.provider === "brave" ? "selected" : ""}>Brave Search</option><option value="tavily" ${webSearch.provider === "tavily" ? "selected" : ""}>Tavily</option></select></label><label class="form-field"><span>${t("settings.apiKey")}</span><input name="apiKey" type="password" autocomplete="new-password" placeholder="${webSearch.credentialRef ? t("settings.apiKeyStored") : ""}"></label><label class="form-field full"><span><input name="clearCredential" type="checkbox"> ${t("settings.clearKey")}</span></label><div class="form-actions full"><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
+		<div class="settings-card"><h3>${t("settings.webSearch")}</h3><form id="web-search-form" class="form-grid"><label class="form-field"><span>${t("settings.provider")}</span><select name="provider"><option value="disabled" ${webSearch.provider === "disabled" ? "selected" : ""}>${t("settings.disabled")}</option><option value="deepseek" ${webSearch.provider === "deepseek" ? "selected" : ""}>${t("settings.webSearchDeepseek")}</option><option value="brave" ${webSearch.provider === "brave" ? "selected" : ""}>Brave Search</option><option value="tavily" ${webSearch.provider === "tavily" ? "selected" : ""}>Tavily</option></select>${webSearch.provider === "deepseek" ? `<p class="muted">${t("settings.webSearchDeepseekHint")}</p>` : ""}</label><label class="form-field"><span>${t("settings.apiKey")}</span><input name="apiKey" type="password" autocomplete="new-password" placeholder="${webSearch.credentialRef ? t("settings.apiKeyStored") : ""}"></label><label class="form-field full"><span><input name="clearCredential" type="checkbox"> ${t("settings.clearKey")}</span></label><div class="form-actions full"><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
 		<div class="settings-card"><h3>${t("settings.window")}</h3><form id="window-behavior-form"><label class="form-field"><span><input name="closeToTray" type="checkbox" ${desktopState.settings.closeToTray ? "checked" : ""}> ${t("settings.closeToTray")}</span></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
 	</section>`;
 }

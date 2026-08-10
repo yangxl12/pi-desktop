@@ -58,6 +58,7 @@ const server = createServer((request, response) => {
 			return;
 		}
 		const requestedToolName = process.env.FAKE_OPENAI_TOOL_NAME ?? "demo_echo";
+		const toolArguments = process.env.FAKE_OPENAI_TOOL_ARGS ?? '{"value":"from-fake-model"}';
 		const tool = Array.isArray(payload.tools)
 			? payload.tools.find((item) => item?.type === "function" && item?.function?.name === requestedToolName)
 			: undefined;
@@ -70,7 +71,7 @@ const server = createServer((request, response) => {
 						index: 0,
 						id: "call-pi-desktop-echo",
 						type: "function",
-						function: { name, arguments: '{"value":"from-fake-model"}' },
+						function: { name, arguments: toolArguments },
 					},
 				],
 			}),

@@ -92,6 +92,15 @@ function isFontSize(value: unknown, min: number, max: number): value is number {
 	return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
 }
 
+function isDeepSeekModel(profile: { providerId: string; baseUrl: string }): boolean {
+	if (profile.providerId.trim().toLowerCase() === "deepseek") return true;
+	try {
+		return new URL(profile.baseUrl).hostname.toLowerCase() === "api.deepseek.com";
+	} catch {
+		return false;
+	}
+}
+
 function cloneMessage(message: DesktopMessage): DesktopMessage {
 	return { ...message, parts: message.parts.map((part) => ({ ...part })) };
 }
@@ -1105,17 +1114,65 @@ export class DesktopApplication {
 			session?.modelProvider && session.modelId
 				? { providerId: session.modelProvider, modelId: session.modelId }
 				: undefined;
-		if (this.settings.webSearch.provider !== "disabled" && this.settings.webSearch.credentialRef) {
+		const selectedModel =
+			sessionModel ??
+			(defaultProfile ? { providerId: defaultProfile.providerId, modelId: defaultProfile.modelId } : undefined);
+		const activeProfile = selectedModel
+			? this.models.find(
+					(candidate) =>
+						candidate.enabled &&
+						candidate.providerId === selectedModel.providerId &&
+						candidate.modelId === selectedModel.modelId,
+				)
+			: undefined;
+		const activeIsDeepSeek = activeProfile !== undefined && isDeepSeekModel(activeProfile);
+		const webSearchProvider = this.settings.webSearch.provider;
+		const deepseekSearchEnabled =
+			webSearchProvider === "deepseek" || (webSearchProvider === "disabled" && activeIsDeepSeek);
+		const deepseekSearchProfile = deepseekSearchEnabled
+			? activeIsDeepSeek
+				? activeProfile
+				: this.models.find((candidate) => candidate.enabled && isDeepSeekModel(candidate))
+			: undefined;
+		const deepseekSearchModel = deepseekSearchProfile
+			? models.find(
+					(model) =>
+						model.providerId === deepseekSearchProfile.providerId &&
+						model.modelId === deepseekSearchProfile.modelId,
+				)
+			: undefined;
+		if (
+			webSearchProvider !== "disabled" &&
+			webSearchProvider !== "deepseek" &&
+			this.settings.webSearch.credentialRef
+		) {
 			const apiKey = this.options.secrets
 				? await this.options.secrets.get(this.settings.webSearch.credentialRef)
 				: null;
 			if (apiKey) {
-				env[this.settings.webSearch.provider === "brave" ? "BRAVE_SEARCH_API_KEY" : "TAVILY_API_KEY"] = apiKey;
+				env[webSearchProvider === "brave" ? "BRAVE_SEARCH_API_KEY" : "TAVILY_API_KEY"] = apiKey;
 				sensitiveValues.push(apiKey);
 			} else {
 				this.recordDiagnostic("warning", "web-search", "Web search credential is unavailable");
 			}
 		}
+		if (deepseekSearchEnabled) {
+			if (deepseekSearchProfile && deepseekSearchModel?.apiKey) {
+				env.PI_DESKTOP_WEB_SEARCH_PROVIDER = "deepseek";
+				env.PI_DESKTOP_WEB_SEARCH_DEEPSEEK_BASE_URL = deepseekSearchProfile.baseUrl.replace(/\/+$/, "");
+				env.PI_DESKTOP_WEB_SEARCH_DEEPSEEK_MODEL = deepseekSearchProfile.modelId;
+				env.PI_DESKTOP_WEB_SEARCH_DEEPSEEK_API_KEY = deepseekSearchModel.apiKey;
+				sensitiveValues.push(deepseekSearchModel.apiKey);
+			} else {
+				this.recordDiagnostic(
+					"warning",
+					"web-search",
+					"DeepSeek built-in search requires an enabled DeepSeek model with a stored API key",
+				);
+			}
+		}
+		const webSearchExtensionEnabled =
+			webSearchProvider !== "disabled" || (webSearchProvider === "disabled" && activeIsDeepSeek);
 		const skillDirectories = this.options.skillPackage?.runtimePaths
 			? await this.options.skillPackage.runtimePaths()
 			: [...this.settings.skillDirectories];
@@ -1129,15 +1186,13 @@ export class DesktopApplication {
 			projectTrusted: project.trustState === "trusted",
 			skillDirectories,
 			extensionPaths:
-				this.settings.webSearch.provider !== "disabled" && this.options.webSearchExtensionPath
+				webSearchExtensionEnabled && this.options.webSearchExtensionPath
 					? [this.options.webSearchExtensionPath]
 					: [],
 			env,
 			sensitiveValues,
 			models,
-			selectedModel:
-				sessionModel ??
-				(defaultProfile ? { providerId: defaultProfile.providerId, modelId: defaultProfile.modelId } : undefined),
+			selectedModel,
 			thinkingLevel: session?.thinkingLevel ?? this.settings.defaultThinkingLevel,
 			runtimeId,
 			providerId: this.options.runtimeProviderId ?? "pi",
@@ -1335,7 +1390,7 @@ export class DesktopApplication {
 			await this.options.secrets.delete(credentialRef);
 			credentialRef = null;
 		}
-		if (apiKey?.trim()) {
+		if (provider !== "deepseek" && apiKey?.trim()) {
 			if (!this.options.secrets) throw new DesktopError("NOT_SUPPORTED", "Secure credential storage is unavailable");
 			credentialRef = await this.options.secrets.set(apiKey.trim(), credentialRef ?? undefined);
 		}

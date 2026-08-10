@@ -35,4 +35,11 @@ describe("desktop protocol schema", () => {
 		expect(isDesktopCommand({ type: "mcp.consent.revoke", projectId: "" })).toBe(false);
 		expect(isDesktopCommand({ type: "models.create", profile: { providerId: "provider" } })).toBe(false);
 	});
+
+	it("validates web search providers including the DeepSeek built-in search", () => {
+		expect(isDesktopCommand({ type: "webSearch.update", provider: "deepseek" })).toBe(true);
+		expect(isDesktopCommand({ type: "webSearch.update", provider: "brave", apiKey: "secret" })).toBe(true);
+		expect(isDesktopCommand({ type: "webSearch.update", provider: "disabled" })).toBe(true);
+		expect(isDesktopCommand({ type: "webSearch.update", provider: "unknown" })).toBe(false);
+	});
 });
