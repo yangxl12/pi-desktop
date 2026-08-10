@@ -1,9 +1,10 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DesktopApplication, FakeAgentRuntime, MemoryMetadataRepository } from "../src/index.ts";
 import type { DesktopHostPorts } from "../src/ports.ts";
+import type { RuntimeStartOptions, RuntimeState } from "../src/runtime-contract.ts";
 
 class TestWindow {
 	private state = { visible: true, minimized: false, maximized: false, closeToTray: true };
@@ -85,6 +86,15 @@ class DelayedSessionFiles {
 
 	async scan(): Promise<{ sessions: []; diagnostics: [] }> {
 		return { sessions: [], diagnostics: [] };
+	}
+}
+
+class RecordingRuntime extends FakeAgentRuntime {
+	readonly starts: RuntimeStartOptions[] = [];
+
+	override async start(options: RuntimeStartOptions): Promise<RuntimeState> {
+		this.starts.push({ ...options, skillDirectories: [...options.skillDirectories] });
+		return super.start(options);
 	}
 }
 
@@ -196,6 +206,25 @@ describe("desktop application", () => {
 		const response = await app.dispatch({ type: "settings.update", patch: { closeToTray: false } });
 		expect(response.success).toBe(true);
 		expect(window.getState().closeToTray).toBe(false);
+	});
+
+	it("restarts the active runtime when Skill directories change", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-desktop-project-"));
+		const skillDirectory = await mkdtemp(join(tmpdir(), "pi-desktop-skill-"));
+		const runtime = new RecordingRuntime();
+		const app = new DesktopApplication({
+			platform: "win32",
+			ports: ports(),
+			pi: runtime,
+			metadata: new MemoryMetadataRepository(),
+		});
+		await app.initialize();
+		await app.dispatch({ type: "projects.add", rootPath: root });
+		expect(runtime.starts).toHaveLength(1);
+		const response = await app.dispatch({ type: "settings.update", patch: { skillDirectories: [skillDirectory] } });
+		expect(response.success).toBe(true);
+		expect(runtime.starts).toHaveLength(2);
+		expect(runtime.starts.at(-1)?.skillDirectories).toEqual([await realpath(skillDirectory)]);
 	});
 
 	it("uses model and thinking defaults for new conversations", async () => {

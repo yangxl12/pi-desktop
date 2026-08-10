@@ -76,6 +76,16 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 	return isRecord(value) && Object.values(value).every((item) => typeof item === "string");
 }
 
+function isSkillSource(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		["npm", "git", "url", "local", "external"].includes(value.kind as string) &&
+		isNonEmptyString(value.spec) &&
+		(value.version === undefined || value.version === null || typeof value.version === "string") &&
+		(value.ref === undefined || value.ref === null || typeof value.ref === "string")
+	);
+}
+
 function isMcpServerDraft(value: unknown): boolean {
 	if (!isRecord(value)) return false;
 	return (
@@ -90,7 +100,16 @@ function isMcpServerDraft(value: unknown): boolean {
 		typeof value.enabled === "boolean" &&
 		Number.isInteger(value.timeoutMs) &&
 		Number.isInteger(value.maxOutputBytes) &&
-		(value.projectId === null || typeof value.projectId === "string")
+		(value.projectId === null || typeof value.projectId === "string") &&
+		(value.launchKind === undefined || ["http", "managed-npm", "executable"].includes(value.launchKind as string)) &&
+		(value.packageSpec === undefined || value.packageSpec === null || typeof value.packageSpec === "string") &&
+		(value.packageVersion === undefined ||
+			value.packageVersion === null ||
+			typeof value.packageVersion === "string") &&
+		(value.bin === undefined || value.bin === null || typeof value.bin === "string") &&
+		(value.secretEnvRefs === undefined || isStringRecord(value.secretEnvRefs)) &&
+		(value.secretHeaderRefs === undefined || isStringRecord(value.secretHeaderRefs)) &&
+		(value.scope === undefined || ["global", "project"].includes(value.scope as string))
 	);
 }
 
@@ -109,6 +128,13 @@ function isMcpServerPatch(value: unknown): boolean {
 		"timeoutMs",
 		"maxOutputBytes",
 		"projectId",
+		"launchKind",
+		"packageSpec",
+		"packageVersion",
+		"bin",
+		"secretEnvRefs",
+		"secretHeaderRefs",
+		"scope",
 	];
 	if (!Object.keys(value).every((key) => allowed.includes(key))) return false;
 	return isMcpServerDraft({
@@ -209,6 +235,14 @@ export function isDesktopCommand(value: unknown): value is DesktopCommand {
 	if (type === "mcp.create") return isMcpServerDraft(value.profile);
 	if (type === "mcp.update") return isNonEmptyString(value.serverId) && isMcpServerPatch(value.patch);
 	if (type === "mcp.delete" || type === "mcp.testConnection") return isNonEmptyString(value.serverId);
+	if (type === "mcp.retry") return isNonEmptyString(value.serverId);
+	if (type === "mcp.testAndSave") return isMcpServerDraft(value.profile);
+	if (type === "mcp.import")
+		return (
+			isNonEmptyString(value.json) &&
+			(value.scope === undefined || ["global", "project"].includes(value.scope as string))
+		);
+	if (type === "mcp.inspect") return isNonEmptyString(value.source);
 	if (type === "mcp.setEnabled") return isNonEmptyString(value.serverId) && typeof value.enabled === "boolean";
 	if (type === "mcp.listTools") return value.projectId === undefined || isNonEmptyString(value.projectId);
 	if (type === "mcp.consent.respond")
@@ -216,6 +250,30 @@ export function isDesktopCommand(value: unknown): value is DesktopCommand {
 			isNonEmptyString(value.requestId) &&
 			typeof value.approved === "boolean" &&
 			(value.scope === undefined || ["once", "session", "project"].includes(value.scope as string))
+		);
+	if (type === "mcp.consent.revoke")
+		return (
+			(value.projectId === undefined || value.projectId === null || isNonEmptyString(value.projectId)) &&
+			(value.toolName === undefined || isNonEmptyString(value.toolName))
+		);
+	if (type === "approval.respond") return isNonEmptyString(value.requestId) && typeof value.approved === "boolean";
+	if (type === "skills.inspect") return isSkillSource(value.source);
+	if (type === "skills.install")
+		return (
+			isSkillSource(value.source) &&
+			(value.scope === undefined || ["global", "project"].includes(value.scope as string)) &&
+			(value.operationId === undefined || isNonEmptyString(value.operationId))
+		);
+	if (type === "skills.import")
+		return (
+			isNonEmptyString(value.path) &&
+			(value.scope === undefined || ["global", "project"].includes(value.scope as string)) &&
+			(value.operationId === undefined || isNonEmptyString(value.operationId))
+		);
+	if (type === "skills.remove" || type === "skills.update")
+		return (
+			isNonEmptyString(value.installationId) &&
+			(value.operationId === undefined || isNonEmptyString(value.operationId))
 		);
 	return false;
 }

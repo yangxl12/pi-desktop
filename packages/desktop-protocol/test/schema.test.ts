@@ -31,6 +31,8 @@ describe("desktop protocol schema", () => {
 			}),
 		).toBe(true);
 		expect(isDesktopCommand({ type: "skills.reload" })).toBe(true);
+		expect(isDesktopCommand({ type: "mcp.consent.revoke", projectId: "project-1" })).toBe(true);
+		expect(isDesktopCommand({ type: "mcp.consent.revoke", projectId: "" })).toBe(false);
 		expect(isDesktopCommand({ type: "models.create", profile: { providerId: "provider" } })).toBe(false);
 	});
 });

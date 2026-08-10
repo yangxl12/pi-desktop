@@ -5,3 +5,4 @@ export * from "./recovering-port.ts";
 export * from "./rpc-port.ts";
 export * from "./rpc-types.ts";
 export * from "./runtime-adapter.ts";
+export * from "./skill-package-adapter.ts";

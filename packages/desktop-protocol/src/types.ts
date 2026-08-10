@@ -39,6 +39,10 @@ export type McpTransport = "stdio" | "http";
 
 export type McpStatus = "stopped" | "starting" | "ready" | "error";
 
+export type McpLaunchKind = "http" | "managed-npm" | "executable";
+
+export type McpAgentAvailability = "unknown" | "pending" | "available" | "unavailable";
+
 export interface McpServerProfile {
 	id: string;
 	name: string;
@@ -53,6 +57,14 @@ export interface McpServerProfile {
 	timeoutMs: number;
 	maxOutputBytes: number;
 	projectId: string | null;
+	/** New launch model. Legacy profiles infer this from transport/command. */
+	launchKind?: McpLaunchKind;
+	packageSpec?: string | null;
+	packageVersion?: string | null;
+	bin?: string | null;
+	secretEnvRefs?: Record<string, string>;
+	secretHeaderRefs?: Record<string, string>;
+	scope?: "global" | "project";
 }
 
 export type McpServerDraft = Omit<McpServerProfile, "id">;
@@ -64,6 +76,15 @@ export interface McpServerSnapshot {
 	toolCount: number;
 	lastError: string | null;
 	startedAt: string | null;
+	connectedAt?: string | null;
+	lastConnectedAt?: string | null;
+	lastCallAt?: string | null;
+	serverInfo?: { name?: string; version?: string } | null;
+	protocolVersion?: string | null;
+	capabilities?: Record<string, unknown>;
+	agentAvailability?: McpAgentAvailability;
+	agentToolGeneration?: number | null;
+	reconnectAttempt?: number;
 }
 
 export interface McpTool {
@@ -218,6 +239,58 @@ export interface SkillCommand {
 	scope?: "user" | "project" | "temporary";
 }
 
+export interface DesktopApprovalRequest {
+	requestId: string;
+	operation: "skill.install" | "skill.remove" | "mcp.install" | "mcp.update" | "mcp.remove";
+	title: string;
+	summary: string;
+	risks: string[];
+	createdAt: string;
+}
+
+export type SkillSourceKind = "npm" | "git" | "url" | "local" | "external";
+export type SkillInstallScope = "global" | "project";
+export type SkillInstallationStatus = "installing" | "installed" | "loaded" | "warning" | "error";
+export type SkillInstallPhase = "inspect" | "download" | "copy" | "install" | "validate" | "commit" | "load";
+
+export interface SkillSource {
+	kind: SkillSourceKind;
+	spec: string;
+	version?: string | null;
+	ref?: string | null;
+}
+
+export interface SkillInstallationSnapshot {
+	id: string;
+	name: string | null;
+	description: string | null;
+	source: SkillSource;
+	scope: SkillInstallScope;
+	path: string | null;
+	version: string | null;
+	status: SkillInstallationStatus;
+	commandName: string | null;
+	diagnostics: string[];
+	operationId: string | null;
+	installedAt: string | null;
+	updatedAt: string;
+}
+
+export interface SkillInstallProgress {
+	operationId: string;
+	phase: SkillInstallPhase;
+	status: "running" | "completed" | "failed" | "cancelled";
+	message?: string;
+	installation?: SkillInstallationSnapshot;
+}
+
+export interface RuntimeToolSetSnapshot {
+	desiredGeneration: number;
+	appliedGeneration: number | null;
+	toolNames: string[];
+	lastError: string | null;
+}
+
 export interface AppSettings {
 	globalSystemPrompt: string;
 	invokeShortcut: string;
@@ -291,9 +364,12 @@ export interface DesktopState {
 	messages: DesktopMessage[];
 	models: ModelProfile[];
 	commands: SkillCommand[];
+	skillInstallations: SkillInstallationSnapshot[];
 	mcpServers: McpServerSnapshot[];
 	mcpTools: McpTool[];
 	consentRequests: McpConsentRequest[];
+	approvalRequests: DesktopApprovalRequest[];
+	runtimeTools?: RuntimeToolSetSnapshot;
 	settings: AppSettings;
 	diagnostics: Diagnostic[];
 	performance?: Record<string, PerformanceSnapshot>;

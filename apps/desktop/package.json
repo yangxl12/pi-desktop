@@ -17,6 +17,7 @@
 		"package:windows": "node scripts/build-windows-installer.mjs",
 		"migrate:sessions": "tsx scripts/session-migration.ts",
 		"release:preflight": "node scripts/release-preflight.mjs",
+		"test:e2e": "node scripts/test-slash-menu-e2e.mjs",
 		"test": "vitest --run test"
 	},
 	"dependencies": {
@@ -32,6 +33,7 @@
 		"electron": "43.2.0",
 		"electron-builder": "26.15.3",
 		"esbuild": "0.28.1",
+		"playwright": "1.54.2",
 		"tsx": "4.22.1",
 		"vitest": "4.1.9"
 	}

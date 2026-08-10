@@ -20,14 +20,15 @@ export class FileSingleInstancePort implements SingleInstancePort {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 			try {
 				const pid = Number(await readFile(this.lockPath, "utf8"));
-				process.kill(pid, 0);
-				return false;
-			} catch {
-				await unlink(this.lockPath).catch(() => undefined);
-				this.handle = await open(this.lockPath, "wx", 0o600);
-				await this.handle.writeFile(String(process.pid), "utf8");
-				return true;
-			}
+				if (pid !== process.pid) {
+					process.kill(pid, 0);
+					return false;
+				}
+			} catch {}
+			await unlink(this.lockPath).catch(() => undefined);
+			this.handle = await open(this.lockPath, "wx", 0o600);
+			await this.handle.writeFile(String(process.pid), "utf8");
+			return true;
 		}
 	}
 

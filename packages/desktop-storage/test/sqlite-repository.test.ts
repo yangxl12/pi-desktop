@@ -51,6 +51,21 @@ describe("SQLite metadata repository", () => {
 			theme: "light",
 			skillDirectories: [join(directory, "skills")],
 		});
+		await repository.saveSkillInstallation({
+			id: "skill-1",
+			name: "review",
+			description: "Review code",
+			source: { kind: "npm", spec: "example-skill", version: "1.2.3" },
+			scope: "global",
+			path: join(directory, "skills", "review"),
+			version: "1.2.3",
+			status: "loaded",
+			commandName: "skill:review",
+			diagnostics: [],
+			operationId: "operation-1",
+			installedAt: "2026-08-01T00:00:00.000Z",
+			updatedAt: "2026-08-01T00:01:00.000Z",
+		});
 		await repository.close();
 
 		const reopened = new SqliteMetadataRepository(databasePath);
@@ -69,6 +84,9 @@ describe("SQLite metadata repository", () => {
 				skillDirectories: [join(directory, "skills")],
 			}),
 		);
+		expect(await reopened.listSkillInstallations()).toEqual([
+			expect.objectContaining({ id: "skill-1", status: "loaded", commandName: "skill:review" }),
+		]);
 		await reopened.close();
 	});
 });

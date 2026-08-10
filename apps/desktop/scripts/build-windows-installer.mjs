@@ -19,6 +19,7 @@ await rm(workDirectory, { recursive: true, force: true });
 await rm(outputDirectory, { recursive: true, force: true });
 await mkdir(join(appResources, "renderer"), { recursive: true });
 await mkdir(join(appResources, "extensions"), { recursive: true });
+await mkdir(join(appResources, "sidecar"), { recursive: true });
 
 const common = {
 	bundle: true,
@@ -33,6 +34,20 @@ await build({ ...common, entryPoints: [join(root, "apps/desktop/src/electron/mai
 await build({ ...common, entryPoints: [join(root, "apps/desktop/src/host/main.ts")], outfile: join(appResources, "host.mjs") });
 await build({ ...common, entryPoints: [piRpcEntry], outfile: join(appResources, "rpc-entry.mjs") });
 await build({ ...common, entryPoints: [join(appDirectory, "src", "extensions", "web-search.ts")], outfile: join(appResources, "extensions", "web-search.mjs") });
+await build({
+	...common,
+	entryPoints: [join(root, "packages", "desktop-pi-bridge", "src", "tool-bridge-extension.ts")],
+	outfile: join(appResources, "extensions", "tool-bridge.mjs"),
+});
+await execFileAsync(process.execPath, [join(appDirectory, "scripts", "package-sidecar.mjs"), join(appResources, "sidecar")], {
+	cwd: root,
+	windowsHide: true,
+	maxBuffer: 10 * 1024 * 1024,
+	env: process.env,
+});
+const sidecarDirectory = join(appResources, "sidecar", `${process.platform}-${process.arch}`);
+for (const relativePath of ["node.exe", "npm/bin/npm-cli.js", "runtime.json"])
+	await access(join(sidecarDirectory, ...relativePath.split("/")));
 const themeDirectory = join(appResources, "dist", "modes", "interactive", "theme");
 await cp(join(piPackageDirectory, "dist", "modes", "interactive", "theme"), themeDirectory, { recursive: true });
 for (const theme of ["dark.json", "light.json"]) await access(join(themeDirectory, theme));
@@ -60,7 +75,14 @@ const builderConfig = {
 	productName: "Pi Desktop",
 	directories: { app: workDirectory, output: outputDirectory, buildResources: workDirectory },
 	files: ["main.mjs", "package.json"],
-	extraResources: [{ from: appResources, to: "app" }],
+	extraResources: [
+		// electron-builder's copy filter always drops the root node_modules folder,
+		// so the Pi runtime's extension alias resolution (import.meta.resolve of
+		// @earendil-works/pi-agent-core etc. from rpc-entry.mjs) must be packaged
+		// through a dedicated mapping.
+		{ from: appResources, to: "app", filter: ["**/*", "!node_modules{,/**/*}"] },
+		{ from: join(appResources, "node_modules"), to: join("app", "node_modules"), filter: ["**/*"] },
+	],
 	electronVersion: "43.2.0",
 	asar: true,
 	win: { target: [{ target: "nsis", arch: ["x64"] }], artifactName: `Pi-Desktop-Setup-${manifest.version}-win11-x64.${"${ext}"}` },
@@ -80,4 +102,16 @@ await execFileAsync(process.execPath, [join(root, "node_modules", "electron-buil
 		ELECTRON_BUILDER_BINARIES_MIRROR: process.env.ELECTRON_BUILDER_BINARIES_MIRROR ?? "https://npmmirror.com/mirrors/electron-builder-binaries/",
 	},
 });
+const unpackedApp = join(outputDirectory, "win-unpacked", "resources", "app");
+for (const relativePath of [
+	"host.mjs",
+	"rpc-entry.mjs",
+	"extensions/tool-bridge.mjs",
+	"extensions/web-search.mjs",
+	"node_modules/@earendil-works/pi-agent-core/package.json",
+	"node_modules/typebox/package.json",
+	"sidecar/win32-x64/node.exe",
+	"sidecar/win32-x64/npm/bin/npm-cli.js",
+])
+	await access(join(unpackedApp, ...relativePath.split("/")));
 console.log(join(outputDirectory, `Pi-Desktop-Setup-${manifest.version}-win11-x64.exe`));

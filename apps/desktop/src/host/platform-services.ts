@@ -13,7 +13,7 @@ interface ProcessResult {
 
 function runProcess(command: string, args: string[], input?: string): Promise<ProcessResult> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+		const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 		const stdout: Buffer[] = [];
 		const stderr: Buffer[] = [];
 		child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));

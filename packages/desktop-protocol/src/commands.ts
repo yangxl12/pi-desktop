@@ -15,6 +15,9 @@ import type {
 	Project,
 	QueueMode,
 	SkillCommand,
+	SkillInstallationSnapshot,
+	SkillInstallScope,
+	SkillSource,
 	ThinkingLevel,
 	TrustState,
 	WebSearchProvider,
@@ -64,7 +67,12 @@ export type DesktopCommandBase =
 	| { type: "models.testConnection"; profileId: string }
 	| { type: "models.setDefault"; profileId: string | null }
 	| { type: "skills.list" }
-	| { type: "skills.reload" };
+	| { type: "skills.reload" }
+	| { type: "skills.inspect"; source: SkillSource }
+	| { type: "skills.install"; source: SkillSource; scope?: SkillInstallScope; operationId?: string }
+	| { type: "skills.import"; path: string; scope?: SkillInstallScope; operationId?: string }
+	| { type: "skills.remove"; installationId: string; operationId?: string }
+	| { type: "skills.update"; installationId: string; operationId?: string };
 
 export type DesktopMcpCommand =
 	| { type: "mcp.list" }
@@ -73,10 +81,17 @@ export type DesktopMcpCommand =
 	| { type: "mcp.delete"; serverId: string }
 	| { type: "mcp.setEnabled"; serverId: string; enabled: boolean }
 	| { type: "mcp.testConnection"; serverId: string }
+	| { type: "mcp.retry"; serverId: string }
+	| { type: "mcp.testAndSave"; profile: McpServerDraft }
+	| { type: "mcp.import"; json: string; scope?: "global" | "project" }
+	| { type: "mcp.inspect"; source: string }
 	| { type: "mcp.listTools"; projectId?: string }
-	| { type: "mcp.consent.respond"; requestId: string; approved: boolean; scope?: "once" | "session" | "project" };
+	| { type: "mcp.consent.respond"; requestId: string; approved: boolean; scope?: "once" | "session" | "project" }
+	| { type: "mcp.consent.revoke"; projectId?: string | null; toolName?: string };
 
-export type DesktopCommand = DesktopCommandBase | DesktopMcpCommand;
+export type DesktopApprovalCommand = { type: "approval.respond"; requestId: string; approved: boolean };
+
+export type DesktopCommand = DesktopCommandBase | DesktopMcpCommand | DesktopApprovalCommand;
 
 export interface DesktopRequest<T extends DesktopCommand = DesktopCommand> {
 	requestId: string;
@@ -105,6 +120,8 @@ export type DesktopCommandResult =
 	| ModelConnectionResult
 	| AppSettings
 	| SkillCommand[]
+	| SkillInstallationSnapshot[]
+	| SkillInstallationSnapshot
 	| McpServerSnapshot[]
 	| McpServerSnapshot
 	| McpTool[]

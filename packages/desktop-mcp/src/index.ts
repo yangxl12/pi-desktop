@@ -1,5 +1,6 @@
 export * from "./json-rpc.ts";
 export * from "./manager.ts";
+export * from "./package-installer.ts";
 export * from "./pi-bridge.ts";
 export * from "./policy.ts";
 export * from "./tool-gateway.ts";

@@ -9,6 +9,7 @@ import type {
 	McpServerProfile,
 	ModelProfile,
 	Project,
+	SkillInstallationSnapshot,
 } from "@earendil-works/pi-desktop-protocol";
 
 interface ProjectRow {
@@ -181,6 +182,11 @@ export class SqliteMetadataRepository implements MetadataRepository {
 				CREATE TABLE IF NOT EXISTS mcp_servers (
 					id TEXT PRIMARY KEY,
 					value_json TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS skill_installations (
+					id TEXT PRIMARY KEY,
+					value_json TEXT NOT NULL,
+					updated_at TEXT NOT NULL
 				);
 			`);
 			const conversationColumns = new Set(
@@ -427,6 +433,25 @@ export class SqliteMetadataRepository implements MetadataRepository {
 
 	async deleteMcpServer(serverId: string): Promise<void> {
 		this.database.prepare("DELETE FROM mcp_servers WHERE id = ?").run(serverId);
+	}
+
+	async listSkillInstallations(): Promise<SkillInstallationSnapshot[]> {
+		const rows = this.database
+			.prepare("SELECT value_json FROM skill_installations ORDER BY updated_at DESC")
+			.all() as Array<{ value_json: string }>;
+		return rows.map((row) => JSON.parse(row.value_json) as SkillInstallationSnapshot);
+	}
+
+	async saveSkillInstallation(installation: SkillInstallationSnapshot): Promise<void> {
+		this.database
+			.prepare(
+				"INSERT INTO skill_installations(id, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+			)
+			.run(installation.id, JSON.stringify(installation), installation.updatedAt);
+	}
+
+	async deleteSkillInstallation(installationId: string): Promise<void> {
+		this.database.prepare("DELETE FROM skill_installations WHERE id = ?").run(installationId);
 	}
 
 	async close(): Promise<void> {

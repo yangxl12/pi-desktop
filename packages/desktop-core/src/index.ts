@@ -1,4 +1,5 @@
 export * from "./application.ts";
+export * from "./desktop-management-tools.ts";
 export * from "./fake-runtime.ts";
 export * from "./memory-repository.ts";
 export * from "./model-gateway.ts";
@@ -11,4 +12,5 @@ export * from "./runtime-provider.ts";
 export * from "./runtime-service.ts";
 export * from "./session-contract.ts";
 export * from "./shortcuts.ts";
+export * from "./skill-install-service.ts";
 export * from "./tool-gateway.ts";

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { McpConsentRequest } from "@earendil-works/pi-desktop-protocol";
 
 export type ConsentScope = "once" | "session" | "project";
@@ -40,6 +42,76 @@ export class InMemoryToolPolicyStore implements ToolPolicyStore {
 			)
 				this.policies.delete(key);
 		}
+	}
+}
+
+function policyKey(projectId: string | null, toolName: string): string {
+	return JSON.stringify([projectId, toolName]);
+}
+
+/** Persists project grants while keeping session grants process-local. */
+export class FileToolPolicyStore implements ToolPolicyStore {
+	private readonly sessionPolicies = new Map<string, ToolPolicyDecision>();
+	private readonly projectPolicies = new Map<string, ToolPolicyDecision>();
+	private readonly path: string;
+
+	constructor(path: string) {
+		this.path = path;
+		try {
+			const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+				version?: number;
+				policies?: Record<string, ToolPolicyDecision>;
+			};
+			if (parsed.version === 1)
+				for (const [key, decision] of Object.entries(parsed.policies ?? {}))
+					if (decision === "allow" || decision === "deny") this.projectPolicies.set(key, decision);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
+
+	get(projectId: string | null, toolName: string): ToolPolicyDecision | null {
+		const key = policyKey(projectId, toolName);
+		return this.sessionPolicies.get(key) ?? this.projectPolicies.get(key) ?? null;
+	}
+
+	set(
+		projectId: string | null,
+		toolName: string,
+		decision: ToolPolicyDecision,
+		scope: Exclude<ConsentScope, "once">,
+	): void {
+		const policies = scope === "session" ? this.sessionPolicies : this.projectPolicies;
+		policies.set(policyKey(projectId, toolName), decision);
+		if (scope === "project") this.persist();
+	}
+
+	revoke(projectId?: string | null, toolName?: string): void {
+		let projectChanged = false;
+		for (const policies of [this.sessionPolicies, this.projectPolicies]) {
+			for (const key of policies.keys()) {
+				const [storedProject, storedTool] = JSON.parse(key) as [string | null, string];
+				if (
+					(projectId === undefined || storedProject === projectId) &&
+					(toolName === undefined || storedTool === toolName)
+				) {
+					policies.delete(key);
+					if (policies === this.projectPolicies) projectChanged = true;
+				}
+			}
+		}
+		if (projectChanged) this.persist();
+	}
+
+	private persist(): void {
+		mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+		const temporary = `${this.path}.tmp`;
+		writeFileSync(
+			temporary,
+			JSON.stringify({ version: 1, policies: Object.fromEntries(this.projectPolicies) }, null, 2),
+			{ encoding: "utf8", mode: 0o600 },
+		);
+		renameSync(temporary, this.path);
 	}
 }
 
@@ -100,6 +172,10 @@ export class ConsentBroker {
 		pending.resolve(approved);
 		this.emit({ type: "consent.resolved", requestId, approved });
 		return true;
+	}
+
+	revoke(projectId?: string | null, toolName?: string): void {
+		this.store.revoke(projectId, toolName);
 	}
 
 	private emit(event: ConsentBrokerEvent): void {

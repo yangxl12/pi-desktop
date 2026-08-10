@@ -14,6 +14,7 @@ import type {
 	QueueMode,
 	RuntimeSnapshot,
 	SkillCommand,
+	SkillInstallationSnapshot,
 	ThinkingLevel,
 	WindowState,
 } from "@earendil-works/pi-desktop-protocol";
@@ -128,7 +129,56 @@ export interface MetadataRepository {
 	listMcpServers(): Promise<McpServerProfile[]>;
 	saveMcpServer(profile: McpServerProfile): Promise<void>;
 	deleteMcpServer(serverId: string): Promise<void>;
+	listSkillInstallations?(): Promise<SkillInstallationSnapshot[]>;
+	saveSkillInstallation?(installation: SkillInstallationSnapshot): Promise<void>;
+	deleteSkillInstallation?(installationId: string): Promise<void>;
 	close(): Promise<void>;
+}
+
+export interface SkillPackageInspection {
+	source: import("@earendil-works/pi-desktop-protocol").SkillSource;
+	name: string | null;
+	description: string | null;
+	version: string | null;
+	path: string | null;
+	diagnostics: string[];
+	risk: string[];
+}
+
+export interface SkillPackageInstallRequest {
+	source: import("@earendil-works/pi-desktop-protocol").SkillSource;
+	scope: import("@earendil-works/pi-desktop-protocol").SkillInstallScope;
+	operationId: string;
+	projectId?: string | null;
+	localPath?: string;
+}
+
+export interface SkillPackagePort {
+	setContext?(options: { cwd?: string; projectTrusted?: boolean; externalPaths?: string[] }): Promise<void> | void;
+	inspect(request: Omit<SkillPackageInstallRequest, "operationId">): Promise<SkillPackageInspection>;
+	install(
+		request: SkillPackageInstallRequest,
+		onProgress?: (phase: import("@earendil-works/pi-desktop-protocol").SkillInstallPhase, message?: string) => void,
+	): Promise<SkillInstallationSnapshot>;
+	/**
+	 * Installation adapters may retain a staged filesystem/settings transaction until the active
+	 * runtime proves that the new command is available. These hooks keep that adapter detail out
+	 * of the Core while making a failed reload reversible.
+	 */
+	commit?(operationId: string): Promise<void>;
+	rollback?(operationId: string): Promise<void>;
+	prepareRemove?(
+		installation: SkillInstallationSnapshot,
+		operationId: string,
+		onProgress?: (phase: import("@earendil-works/pi-desktop-protocol").SkillInstallPhase, message?: string) => void,
+	): Promise<void>;
+	remove(
+		installation: SkillInstallationSnapshot,
+		onProgress?: (phase: import("@earendil-works/pi-desktop-protocol").SkillInstallPhase, message?: string) => void,
+	): Promise<void>;
+	list(scope?: import("@earendil-works/pi-desktop-protocol").SkillInstallScope): Promise<SkillInstallationSnapshot[]>;
+	reconcile(): Promise<SkillInstallationSnapshot[]>;
+	runtimePaths?(): Promise<string[]>;
 }
 
 export interface McpPort {
@@ -141,6 +191,8 @@ export interface McpPort {
 	listTools(projectId?: string): McpTool[];
 	listToolDefinitions?(projectId?: string, trusted?: boolean): RuntimeToolDefinition[];
 	respondConsent?(requestId: string, approved: boolean, scope?: "once" | "session" | "project"): boolean;
+	revokeConsent?(projectId?: string | null, toolName?: string): void;
+	removeManagedPackage?(serverId: string): Promise<void>;
 	dispose?(): void;
 	subscribe(listener: (event: McpPortEvent) => void): () => void;
 }

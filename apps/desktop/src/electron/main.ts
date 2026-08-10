@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { app, BrowserWindow, globalShortcut, Menu, nativeImage, shell, Tray } from "electron";
 import {
@@ -21,6 +22,19 @@ let shortcutReturnTarget: "tray" | "minimized" | null = null;
 
 function resourcePath(...parts: string[]): string {
 	return join(process.env.PI_DESKTOP_RESOURCES_DIR ?? process.resourcesPath, ...parts);
+}
+
+function hostNodePath(): { executable: string; runAsNode: boolean } {
+	const configured = process.env.PI_DESKTOP_HOST_NODE;
+	if (configured && existsSync(configured)) return { executable: configured, runAsNode: false };
+	const sidecar = resourcePath(
+		"app",
+		"sidecar",
+		`${process.platform}-${process.arch}`,
+		process.platform === "win32" ? "node.exe" : "node",
+	);
+	if (existsSync(sidecar)) return { executable: sidecar, runAsNode: false };
+	return { executable: process.execPath, runAsNode: true };
 }
 
 function trayIcon(): Electron.NativeImage {
@@ -103,21 +117,38 @@ async function waitForHost(): Promise<void> {
 }
 
 function startHost(): void {
-	const executable = process.execPath;
+	const hostNode = hostNodePath();
 	const args = [resourcePath("app", "host.mjs")];
-	host = spawn(executable, args, {
+	const hostEnvironment: NodeJS.ProcessEnv = {
+		...process.env,
+		PI_DESKTOP_PORT: String(port),
+		PI_DESKTOP_HOST_TOKEN: hostToken,
+		PI_DESKTOP_RPC_ENTRY: resourcePath("app", "rpc-entry.mjs"),
+		PI_PACKAGE_DIR: resourcePath("app"),
+		PI_DESKTOP_RENDERER_DIR: resourcePath("app", "renderer"),
+		PI_DESKTOP_LUCIDE_DIR: resourcePath("app", "lucide"),
+		PI_DESKTOP_WEB_SEARCH_EXTENSION: resourcePath("app", "extensions", "web-search.mjs"),
+		PI_DESKTOP_TOOL_BRIDGE_EXTENSION: resourcePath("app", "extensions", "tool-bridge.mjs"),
+		PI_DESKTOP_SIDECAR_NODE: resourcePath(
+			"app",
+			"sidecar",
+			`${process.platform}-${process.arch}`,
+			process.platform === "win32" ? "node.exe" : "node",
+		),
+		PI_DESKTOP_NPM_CLI: resourcePath(
+			"app",
+			"sidecar",
+			`${process.platform}-${process.arch}`,
+			"npm",
+			"bin",
+			"npm-cli.js",
+		),
+	};
+	if (hostNode.runAsNode) hostEnvironment.ELECTRON_RUN_AS_NODE = "1";
+	else delete hostEnvironment.ELECTRON_RUN_AS_NODE;
+	host = spawn(hostNode.executable, args, {
 		windowsHide: true,
-		env: {
-			...process.env,
-			ELECTRON_RUN_AS_NODE: "1",
-			PI_DESKTOP_PORT: String(port),
-			PI_DESKTOP_HOST_TOKEN: hostToken,
-			PI_DESKTOP_RPC_ENTRY: resourcePath("app", "rpc-entry.mjs"),
-			PI_PACKAGE_DIR: resourcePath("app"),
-			PI_DESKTOP_RENDERER_DIR: resourcePath("app", "renderer"),
-			PI_DESKTOP_LUCIDE_DIR: resourcePath("app", "lucide"),
-			PI_DESKTOP_WEB_SEARCH_EXTENSION: resourcePath("app", "extensions", "web-search.mjs"),
-		},
+		env: hostEnvironment,
 		stdio: ["ignore", "ignore", "ignore", "ipc"],
 	});
 	host.on("message", (message: unknown) => void handleHostMessage(message));

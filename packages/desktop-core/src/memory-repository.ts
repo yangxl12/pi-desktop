@@ -5,6 +5,7 @@ import type {
 	McpServerProfile,
 	ModelProfile,
 	Project,
+	SkillInstallationSnapshot,
 } from "@earendil-works/pi-desktop-protocol";
 import type { MetadataRepository, SecretStore } from "./ports.ts";
 
@@ -29,6 +30,7 @@ export class MemoryMetadataRepository implements MetadataRepository {
 	private readonly conversations = new Map<string, ConversationIndex>();
 	private readonly models = new Map<string, ModelProfile>();
 	private readonly mcpServers = new Map<string, McpServerProfile>();
+	private readonly skillInstallations = new Map<string, SkillInstallationSnapshot>();
 
 	async initialize(): Promise<void> {}
 
@@ -115,6 +117,22 @@ export class MemoryMetadataRepository implements MetadataRepository {
 
 	async deleteMcpServer(serverId: string): Promise<void> {
 		this.mcpServers.delete(serverId);
+	}
+
+	async listSkillInstallations(): Promise<SkillInstallationSnapshot[]> {
+		return [...this.skillInstallations.values()].map((item) => ({
+			...item,
+			diagnostics: [...item.diagnostics],
+			source: { ...item.source },
+		}));
+	}
+
+	async saveSkillInstallation(item: SkillInstallationSnapshot): Promise<void> {
+		this.skillInstallations.set(item.id, { ...item, diagnostics: [...item.diagnostics], source: { ...item.source } });
+	}
+
+	async deleteSkillInstallation(installationId: string): Promise<void> {
+		this.skillInstallations.delete(installationId);
 	}
 
 	async close(): Promise<void> {}

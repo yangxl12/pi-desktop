@@ -135,7 +135,7 @@ input:focus, textarea:focus, select:focus { border-color: #5d8aaa; box-shadow: 0
 .queue-controls span { margin-right: 3px; }
 .queue-controls button { border: 1px solid #354553; border-radius: 4px; padding: 4px 7px; background: #17232d; color: #a9bac8; cursor: pointer; font-size: 11px; }
 .queue-controls button.selected { border-color: #6292ad; color: #eff6fa; background: #274b5f; }
-.slash-menu { position: absolute; z-index: 4; bottom: 120px; left: var(--content-gutter); right: var(--content-gutter); width: min(var(--content-width), calc(100% - 2 * var(--content-gutter))); margin: 0 auto; padding: 5px; border: 1px solid #344452; border-radius: 7px; background: #151f28; box-shadow: 0 14px 35px #0007; }
+.slash-menu { position: absolute; z-index: 4; bottom: 120px; left: var(--content-gutter); right: var(--content-gutter); width: min(var(--content-width), calc(100% - 2 * var(--content-gutter))); max-height: 320px; overflow-y: auto; overscroll-behavior: contain; margin: 0 auto; padding: 5px; border: 1px solid #344452; border-radius: 7px; background: #151f28; box-shadow: 0 14px 35px #0007; }
 .slash-item { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 5px; cursor: pointer; }
 .slash-item:hover, .slash-item.selected { background: #213541; }
 .slash-item strong { color: #e1eaf0; font-size: 12px; }
@@ -182,6 +182,14 @@ input:focus, textarea:focus, select:focus { border-color: #5d8aaa; box-shadow: 0
 .context-menu { position: fixed; z-index: 20; min-width: 150px; padding: 4px; border: 1px solid #344452; border-radius: 6px; background: #151f28; box-shadow: 0 14px 35px #0007; }
 .context-menu button { width: 100%; display: block; border: 0; border-radius: 4px; padding: 8px 10px; background: transparent; color: #dce5eb; text-align: left; cursor: pointer; font-size: 12px; }
 .context-menu button:hover { background: #213541; }
+.modal-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 20px; background: #05090dc4; }
+.consent-dialog { width: min(520px, 100%); border: 1px solid #3a4a57; border-radius: 8px; padding: 20px; background: #141d25; box-shadow: 0 24px 70px #000a; }
+.consent-dialog h2 { margin: 0 0 8px; font-size: 17px; }
+.consent-dialog p { margin: 0 0 15px; color: #95a5b2; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.consent-summary { display: grid; grid-template-columns: 100px 1fr; gap: 7px 12px; margin: 0 0 18px; font-size: 12px; }
+.consent-summary dt { color: #718493; }
+.consent-summary dd { margin: 0; color: #d5dfe6; overflow-wrap: anywhere; }
+.consent-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 :root[data-theme="light"] {
 	color-scheme: light;
 	background: #f4f6f8;
@@ -280,6 +288,11 @@ input:focus, textarea:focus, select:focus { border-color: #5d8aaa; box-shadow: 0
 :root[data-theme="light"] .slash-item:hover,
 :root[data-theme="light"] .slash-item.selected,
 :root[data-theme="light"] .context-menu button:hover { background: #e5eef3; }
+:root[data-theme="light"] .modal-backdrop { background: #17212b80; }
+:root[data-theme="light"] .consent-dialog { border-color: #bdcbd5; background: #fff; box-shadow: 0 24px 70px #20303c40; }
+:root[data-theme="light"] .consent-dialog p,
+:root[data-theme="light"] .consent-summary dt { color: #647684; }
+:root[data-theme="light"] .consent-summary dd { color: #1d2b36; }
 :root[data-theme="light"] .slash-item strong,
 :root[data-theme="light"] .context-menu button { color: #29404f; }
 :root[data-theme="light"] .slash-item span { color: #70818e; }

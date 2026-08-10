@@ -6,6 +6,11 @@ import type { McpSecretResolver, McpServerProfile, McpToolResult } from "./types
 export interface McpTransportClient {
 	request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
 	close(): Promise<void>;
+	onClose?(listener: () => void): void;
+	onError?(listener: (error: Error) => void): void;
+	serverVersion?: { name?: string; version?: string };
+	protocolVersion?: string;
+	capabilities?: Record<string, unknown>;
 }
 
 function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; dispose: () => void } {
@@ -27,14 +32,43 @@ class SdkClient implements McpTransportClient {
 	private readonly client: Client;
 	private readonly transport: StdioClientTransport | StreamableHTTPClientTransport;
 
-	constructor(client: Client, transport: StdioClientTransport | StreamableHTTPClientTransport) {
+	serverVersion?: { name?: string; version?: string };
+	protocolVersion?: string;
+	capabilities?: Record<string, unknown>;
+
+	constructor(
+		client: Client,
+		transport: StdioClientTransport | StreamableHTTPClientTransport,
+		options: { onToolsChanged?: () => void; onClose?: () => void; onError?: (error: Error) => void } = {},
+	) {
 		this.client = client;
 		this.transport = transport;
+		transport.onclose = () => options.onClose?.();
+		transport.onerror = (error) => options.onError?.(error);
+		client.onclose = () => options.onClose?.();
+		client.onerror = (error) => options.onError?.(error instanceof Error ? error : new Error(String(error)));
+		this.serverVersion = client.getServerVersion() ?? undefined;
+		this.capabilities = client.getServerCapabilities() as Record<string, unknown> | undefined;
+	}
+
+	/** Refresh lifecycle metadata after Client.connect() completes initialization. */
+	refreshMetadata(): void {
+		this.serverVersion = this.client.getServerVersion() ?? undefined;
+		this.capabilities = this.client.getServerCapabilities() as Record<string, unknown> | undefined;
+		if ("protocolVersion" in this.transport)
+			this.protocolVersion = this.transport.protocolVersion ?? this.protocolVersion;
+	}
+
+	onClose(listener: () => void): void {
+		this.transport.onclose = listener;
+	}
+	onError(listener: (error: Error) => void): void {
+		this.transport.onerror = listener;
 	}
 
 	async request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
 		if (method === "initialize") return this.client.getServerVersion() ?? {};
-		if (method === "tools/list") return this.client.listTools(undefined, { signal });
+		if (method === "tools/list") return this.client.listTools(params as { cursor?: string } | undefined, { signal });
 		if (method === "tools/call") {
 			if (!params || typeof params.name !== "string") throw new Error("MCP tool name is required");
 			return this.client.callTool(
@@ -55,27 +89,71 @@ class SdkClient implements McpTransportClient {
 export async function createMcpTransport(
 	profile: McpServerProfile,
 	secrets: McpSecretResolver | undefined,
+	options: { onToolsChanged?: () => void; onClose?: () => void; onError?: (error: Error) => void } = {},
 ): Promise<McpTransportClient> {
 	const secret = profile.credentialRef && secrets ? await secrets.get(profile.credentialRef) : null;
-	const client = new Client({ name: "pi-desktop", version: "0.83.0" }, { capabilities: {} });
+	const client = new Client(
+		{ name: "pi-desktop", version: "0.83.0" },
+		{
+			capabilities: {},
+			listChanged: { tools: { onChanged: () => options.onToolsChanged?.() } },
+		},
+	);
 	let transport: StdioClientTransport | StreamableHTTPClientTransport;
 	if (profile.transport === "stdio") {
 		if (!profile.command) throw new Error("MCP STDIO server requires a command");
+		const envSecrets =
+			profile.secretEnvRefs && secrets
+				? Object.fromEntries(
+						await Promise.all(
+							Object.entries(profile.secretEnvRefs).map(
+								async ([key, ref]) => [key, await secrets.get(ref)] as const,
+							),
+						),
+					)
+				: {};
 		transport = new StdioClientTransport({
 			command: profile.command,
 			args: profile.args,
-			env: { ...profile.env, ...(secret ? { PI_MCP_SECRET: secret } : {}) },
+			env: {
+				...profile.env,
+				...(secret ? { PI_MCP_SECRET: secret } : {}),
+				...Object.fromEntries(
+					Object.entries(envSecrets).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+				),
+			},
 			stderr: "pipe",
 			maxBufferSize: profile.maxOutputBytes,
 		});
 	} else {
 		if (!profile.url) throw new Error("MCP HTTP server requires a URL");
+		const headerSecrets =
+			profile.secretHeaderRefs && secrets
+				? Object.fromEntries(
+						await Promise.all(
+							Object.entries(profile.secretHeaderRefs).map(
+								async ([key, ref]) => [key, await secrets.get(ref)] as const,
+							),
+						),
+					)
+				: {};
 		transport = new StreamableHTTPClientTransport(new URL(profile.url), {
-			requestInit: { headers: secret ? { authorization: `Bearer ${secret}` } : undefined },
+			requestInit: {
+				headers: {
+					...(secret ? { authorization: `Bearer ${secret}` } : {}),
+					...Object.fromEntries(
+						Object.entries(headerSecrets).filter(
+							(entry): entry is [string, string] => typeof entry[1] === "string",
+						),
+					),
+				},
+			},
 		});
 	}
+	const wrapped = new SdkClient(client, transport, options);
 	await client.connect(transport);
-	return new SdkClient(client, transport);
+	wrapped.refreshMetadata();
+	return wrapped;
 }
 
 export async function callMcpTool(

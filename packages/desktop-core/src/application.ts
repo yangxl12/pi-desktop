@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type {
 	AppSettings,
 	ConversationIndex,
+	DesktopApprovalRequest,
 	DesktopCommand,
 	DesktopEvent,
 	DesktopMessage,
@@ -22,10 +23,14 @@ import type {
 	Project,
 	RuntimeSnapshot,
 	SkillCommand,
+	SkillInstallationSnapshot,
+	SkillInstallScope,
+	SkillSource,
 	ThinkingLevel,
 	TrustState,
 } from "@earendil-works/pi-desktop-protocol";
 import { DesktopError, toDesktopError } from "@earendil-works/pi-desktop-protocol";
+import { createDesktopManagementTools } from "./desktop-management-tools.ts";
 import { DEFAULT_APP_SETTINGS } from "./memory-repository.ts";
 import { ModelGateway } from "./model-gateway.ts";
 import { normalizeModelBaseUrl } from "./models.ts";
@@ -44,8 +49,10 @@ import type {
 	SecretStore,
 	SessionFileRepository,
 	SessionFileSummary,
+	SkillPackagePort,
 } from "./ports.ts";
 import { defaultInvokeShortcut, normalizeShortcut } from "./shortcuts.ts";
+import { SkillInstallService } from "./skill-install-service.ts";
 
 interface ApplicationOptions {
 	platform: "win32" | "darwin" | "linux";
@@ -60,6 +67,7 @@ interface ApplicationOptions {
 	sessionFiles?: SessionFileRepository;
 	modelConnection?: ModelConnectionTester;
 	mcp?: McpPort;
+	skillPackage?: SkillPackagePort;
 	logger?: DesktopLogger;
 	agentDirectory?: string;
 	sessionDirectory?: (project: Project) => string;
@@ -222,6 +230,87 @@ function publicMcpSnapshot(snapshot: McpServerSnapshot): McpServerSnapshot {
 	};
 }
 
+interface PendingApproval {
+	resolve(approved: boolean): void;
+	timer: ReturnType<typeof setTimeout>;
+}
+
+export function normalizeMcpProfileSource(
+	source: string,
+): McpServerDraft & { launchKind: "http" | "managed-npm" | "executable" } {
+	const defaults = {
+		name: "Imported MCP",
+		namespace: "imported",
+		transport: "stdio" as const,
+		command: null as string | null,
+		args: [] as string[],
+		env: {} as Record<string, string>,
+		url: null as string | null,
+		credentialRef: null as string | null,
+		enabled: true,
+		timeoutMs: 30_000,
+		maxOutputBytes: 1_048_576,
+		projectId: null as string | null,
+	};
+	try {
+		const value = JSON.parse(source) as Record<string, unknown>;
+		const command = typeof value.command === "string" ? value.command : null;
+		const args = Array.isArray(value.args)
+			? value.args.filter((item): item is string => typeof item === "string")
+			: [];
+		const url = typeof value.url === "string" ? value.url : null;
+		const launchKind =
+			value.launchKind === "managed-npm" || value.launchKind === "executable" || value.launchKind === "http"
+				? value.launchKind
+				: url
+					? "http"
+					: command?.toLowerCase() === "npx" || command?.toLowerCase() === "npx.cmd"
+						? "managed-npm"
+						: "executable";
+		return {
+			...defaults,
+			name: typeof value.name === "string" ? value.name : defaults.name,
+			namespace: typeof value.namespace === "string" ? value.namespace : "imported",
+			transport: launchKind === "http" ? "http" : "stdio",
+			command,
+			args,
+			url,
+			credentialRef: typeof value.credentialRef === "string" ? value.credentialRef : null,
+			enabled: typeof value.enabled === "boolean" ? value.enabled : true,
+			timeoutMs: Number.isInteger(value.timeoutMs) ? Number(value.timeoutMs) : defaults.timeoutMs,
+			maxOutputBytes: Number.isInteger(value.maxOutputBytes)
+				? Number(value.maxOutputBytes)
+				: defaults.maxOutputBytes,
+			projectId: typeof value.projectId === "string" ? value.projectId : null,
+			launchKind,
+			packageSpec:
+				typeof value.packageSpec === "string"
+					? value.packageSpec
+					: launchKind === "managed-npm"
+						? (args.find((arg) => arg !== "-y" && !arg.startsWith("-")) ?? null)
+						: null,
+			packageVersion: typeof value.packageVersion === "string" ? value.packageVersion : null,
+			bin: typeof value.bin === "string" ? value.bin : null,
+			scope: value.scope === "project" ? "project" : "global",
+		};
+	} catch {
+		const tokens = source.trim().split(/\s+/);
+		if (tokens[0] === "npx") {
+			const packageSpec = tokens.find((token) => token !== "npx" && token !== "-y" && !token.startsWith("-")) ?? "";
+			return {
+				...defaults,
+				name: packageSpec || defaults.name,
+				namespace: packageSpec.replace(/[^a-z0-9_-]/gi, "_").slice(0, 32) || "mcp",
+				command: "npx",
+				args: tokens.slice(1),
+				launchKind: "managed-npm",
+				packageSpec,
+			};
+		}
+		return { ...defaults, command: tokens[0] || null, args: tokens.slice(1), launchKind: "executable" };
+	}
+}
+
 export class DesktopApplication {
 	private readonly options: ApplicationOptions;
 	private readonly listeners = new Set<(event: DesktopEvent) => void>();
@@ -240,7 +329,17 @@ export class DesktopApplication {
 	private mcpServers: McpServerSnapshot[] = [];
 	private mcpProfiles: McpServerProfile[] = [];
 	private consentRequests: McpConsentRequest[] = [];
+	private approvalRequests: DesktopApprovalRequest[] = [];
+	private readonly pendingApprovals = new Map<string, PendingApproval>();
 	private commands: SkillCommand[] = [];
+	private skillInstallations: SkillInstallationSnapshot[] = [];
+	private readonly skillService: SkillInstallService | undefined;
+	private runtimeToolSet = {
+		desiredGeneration: 0,
+		appliedGeneration: null as number | null,
+		toolNames: [] as string[],
+		lastError: null as string | null,
+	};
 	private activeProjectId: string | null = null;
 	private activeSessionId: string | null = null;
 	private draftSession: ConversationIndex | null = null;
@@ -262,6 +361,16 @@ export class DesktopApplication {
 		this.modelGateway = new ModelGateway(options.secrets);
 		this.piUnsubscribe = this.runtimePort.subscribe((event) => this.handleAgentEvent(event));
 		this.mcpUnsubscribe = options.mcp?.subscribe((event) => this.handleMcpEvent(event));
+		if (options.skillPackage)
+			this.skillService = new SkillInstallService({
+				port: options.skillPackage,
+				metadata: options.metadata,
+				onProgress: (progress) => this.emit({ type: "skills.installProgress", progress }),
+				onReload: async () => {
+					if (this.runtime) await this.restartActiveRuntime("skills changed");
+					return this.commands;
+				},
+			});
 	}
 
 	subscribe(listener: (event: DesktopEvent) => void): () => void {
@@ -299,6 +408,17 @@ export class DesktopApplication {
 		if (!this.models.some((model) => model.id === this.settings.defaultModelProfileId && model.enabled))
 			this.settings.defaultModelProfileId = firstEnabledModel?.id ?? null;
 		await this.options.metadata.saveSettings(this.settings);
+		this.skillInstallations = this.skillService
+			? await this.skillService.reconcile()
+			: ((await this.options.metadata.listSkillInstallations?.()) ?? []);
+		this.emit({
+			type: "skills.catalogChanged",
+			installations: this.skillInstallations.map((item) => ({
+				...item,
+				diagnostics: [...item.diagnostics],
+				source: { ...item.source },
+			})),
+		});
 		this.mcpProfiles = await this.options.metadata.listMcpServers();
 		this.options.mcp?.setProfiles(this.mcpProfiles);
 		this.mcpServers = this.options.mcp?.list() ?? [];
@@ -344,12 +464,19 @@ export class DesktopApplication {
 			messages: collapseMessages([...this.messages.values()]),
 			models: this.models.map((model) => ({ ...model })),
 			commands: this.commands.map((command) => ({ ...command })),
+			skillInstallations: this.skillInstallations.map((item) => ({
+				...item,
+				diagnostics: [...item.diagnostics],
+				source: { ...item.source },
+			})),
 			mcpServers: this.mcpServers.map((server) => ({
 				...server,
 				profile: { ...server.profile, args: [...server.profile.args], env: { ...server.profile.env } },
 			})),
 			mcpTools: this.options.mcp?.listTools(this.activeProjectId ?? undefined) ?? [],
 			consentRequests: this.consentRequests.map((request) => ({ ...request })),
+			approvalRequests: this.approvalRequests.map((request) => ({ ...request, risks: [...request.risks] })),
+			runtimeTools: { ...this.runtimeToolSet, toolNames: [...this.runtimeToolSet.toolNames] },
 			settings: { ...this.settings, skillDirectories: [...this.settings.skillDirectories] },
 			diagnostics: this.diagnostics.map((diagnostic) => ({ ...diagnostic })),
 			performance: this.performance.all(),
@@ -445,9 +572,21 @@ export class DesktopApplication {
 			case "models.setDefault":
 				return this.setDefaultModel(command.profileId);
 			case "skills.list":
-				return this.commands.filter((command) => command.source === "skill");
+				return this.skillInstallations.length > 0
+					? this.skillInstallations
+					: this.commands.filter((command) => command.source === "skill");
 			case "skills.reload":
 				return this.reloadSkills();
+			case "skills.inspect":
+				return this.inspectSkill(command.source);
+			case "skills.install":
+				return this.installSkill(command.source, command.scope, command.operationId);
+			case "skills.import":
+				return this.importSkill(command.path, command.scope, command.operationId);
+			case "skills.remove":
+				return this.removeSkill(command.installationId, command.operationId);
+			case "skills.update":
+				return this.updateSkill(command.installationId, command.operationId);
 			case "mcp.list":
 				return this.mcpServers;
 			case "mcp.create":
@@ -460,11 +599,28 @@ export class DesktopApplication {
 				return this.setMcpEnabled(command.serverId, command.enabled);
 			case "mcp.testConnection":
 				return this.testMcpConnection(command.serverId);
+			case "mcp.retry":
+				return this.retryMcpServer(command.serverId);
+			case "mcp.testAndSave":
+				return this.testAndSaveMcp(command.profile);
+			case "mcp.import":
+				return this.importMcp(command.json, command.scope);
+			case "mcp.inspect":
+				return this.inspectMcp(command.source);
 			case "mcp.listTools":
 				return this.options.mcp?.listTools(command.projectId ?? this.activeProjectId ?? undefined) ?? [];
 			case "mcp.consent.respond":
 				if (!this.options.mcp?.respondConsent?.(command.requestId, command.approved, command.scope))
 					throw new DesktopError("NOT_FOUND", "Consent request is no longer pending", {
+						requestId: command.requestId,
+					});
+				return true;
+			case "mcp.consent.revoke":
+				this.options.mcp?.revokeConsent?.(command.projectId, command.toolName);
+				return true;
+			case "approval.respond":
+				if (!this.respondApproval(command.requestId, command.approved))
+					throw new DesktopError("NOT_FOUND", "Approval request is no longer pending", {
 						requestId: command.requestId,
 					});
 				return true;
@@ -482,6 +638,7 @@ export class DesktopApplication {
 	}
 
 	private async quit(): Promise<void> {
+		for (const requestId of [...this.pendingApprovals.keys()]) this.resolveApproval(requestId, false);
 		await this.options.mcp?.stopAll("application quit");
 		this.options.mcp?.dispose?.();
 		await this.stopRuntime("application quit");
@@ -883,6 +1040,11 @@ export class DesktopApplication {
 			this.runtime = asRuntimeSnapshot(project.id, sessionId, runtimeId, { status: "ready", ...state });
 			await this.refreshRuntimeMessages();
 			await this.refreshCommands();
+			if (this.skillService) {
+				this.skillInstallations = await this.skillService.reconcile(this.commands);
+				this.emit({ type: "skills.catalogChanged", installations: this.skillInstallations });
+			}
+			await this.applyRuntimeTools();
 			const sessionPath = state.sessionPath ?? state.sessionRef;
 			const providerId = state.providerId ?? this.options.runtimeProviderId ?? "pi";
 			if (session && (sessionPath !== session.sessionPath || session.runtimeProviderId !== providerId)) {
@@ -922,6 +1084,10 @@ export class DesktopApplication {
 	}
 
 	private async buildRuntimeOptions(project: Project, session: ConversationIndex | undefined, runtimeId: string) {
+		await this.options.skillPackage?.setContext?.({
+			cwd: project.rootPath,
+			projectTrusted: project.trustState === "trusted",
+		});
 		const models: RuntimeModel[] = await this.modelGateway.resolveEnabled(this.models);
 		const env: Record<string, string> = {};
 		const sensitiveValues: string[] = [];
@@ -950,6 +1116,9 @@ export class DesktopApplication {
 				this.recordDiagnostic("warning", "web-search", "Web search credential is unavailable");
 			}
 		}
+		const skillDirectories = this.options.skillPackage?.runtimePaths
+			? await this.options.skillPackage.runtimePaths()
+			: [...this.settings.skillDirectories];
 		return {
 			cwd: project.rootPath,
 			sessionRef: session?.sessionPath,
@@ -958,7 +1127,7 @@ export class DesktopApplication {
 			agentDirectory: this.agentDirectory(project),
 			globalSystemPrompt: this.settings.globalSystemPrompt,
 			projectTrusted: project.trustState === "trusted",
-			skillDirectories: [...this.settings.skillDirectories],
+			skillDirectories,
 			extensionPaths:
 				this.settings.webSearch.provider !== "disabled" && this.options.webSearchExtensionPath
 					? [this.options.webSearchExtensionPath]
@@ -972,11 +1141,28 @@ export class DesktopApplication {
 			thinkingLevel: session?.thinkingLevel ?? this.settings.defaultThinkingLevel,
 			runtimeId,
 			providerId: this.options.runtimeProviderId ?? "pi",
-			tools: this.options.mcp?.listToolDefinitions?.(
-				this.activeProjectId ?? undefined,
-				project.trustState === "trusted",
-			),
+			tools: this.runtimeToolDefinitions(project),
 		};
+	}
+
+	private runtimeToolDefinitions(project?: Project) {
+		return [
+			...createDesktopManagementTools({
+				skills: this.skillService,
+				mcp: this.options.mcp,
+				metadata: this.options.metadata,
+				getProjectId: () => this.activeProjectId,
+				approve: (request) => this.requestApproval(request),
+				inspectMcp: (source) => this.inspectMcp(source),
+				installMcp: (profile) => this.installMcpFromAgent(profile),
+				updateMcp: (serverId, patch) => this.updateMcpServer(serverId, patch),
+				removeMcp: (serverId) => this.deleteMcpServer(serverId),
+			}),
+			...(this.options.mcp?.listToolDefinitions?.(
+				this.activeProjectId ?? undefined,
+				project?.trustState === "trusted",
+			) ?? []),
+		];
 	}
 
 	private async stopRuntime(reason: string): Promise<void> {
@@ -1113,7 +1299,16 @@ export class DesktopApplication {
 		}
 		if (patch.closeToTray !== undefined) await this.options.ports.window.setCloseToTray(next.closeToTray);
 		await this.options.metadata.saveSettings(next);
+		const skillDirectoriesChanged =
+			JSON.stringify(next.skillDirectories) !== JSON.stringify(this.settings.skillDirectories);
 		this.settings = next;
+		if (skillDirectoriesChanged) {
+			if (this.runtime) await this.restartActiveRuntime("skill directories changed");
+			if (this.skillService) {
+				this.skillInstallations = await this.skillService.reconcile(this.commands);
+				this.emit({ type: "skills.catalogChanged", installations: this.skillInstallations });
+			}
+		}
 		return {
 			...this.settings,
 			skillDirectories: [...this.settings.skillDirectories],
@@ -1276,7 +1471,92 @@ export class DesktopApplication {
 
 	private async reloadSkills(): Promise<SkillCommand[]> {
 		await this.restartActiveRuntime("skills reloaded");
+		if (this.skillService) {
+			this.skillInstallations = await this.skillService.reconcile(this.commands);
+			this.emit({ type: "skills.catalogChanged", installations: this.skillInstallations });
+		}
 		return this.commands.filter((command) => command.source === "skill");
+	}
+
+	private async applyRuntimeTools(): Promise<void> {
+		if (!this.runtimePort.setTools) return;
+		const project = this.projects.find((candidate) => candidate.id === this.activeProjectId);
+		const definitions = this.runtimeToolDefinitions(project);
+		const generation = this.runtimeToolSet.desiredGeneration + 1;
+		this.runtimeToolSet = {
+			desiredGeneration: generation,
+			appliedGeneration: null,
+			toolNames: definitions.map((tool) => tool.name),
+			lastError: null,
+		};
+		this.emit({
+			type: "runtime.toolsChanged",
+			snapshot: { ...this.runtimeToolSet, toolNames: [...this.runtimeToolSet.toolNames] },
+		});
+		try {
+			await this.runtimePort.setTools(definitions);
+			this.runtimeToolSet = { ...this.runtimeToolSet, appliedGeneration: generation };
+			this.emit({
+				type: "runtime.toolsChanged",
+				snapshot: { ...this.runtimeToolSet, toolNames: [...this.runtimeToolSet.toolNames] },
+			});
+			if (this.options.mcp) {
+				this.mcpServers = this.mcpServers.map((server) => ({
+					...server,
+					agentAvailability: server.toolCount > 0 ? "available" : "unknown",
+					agentToolGeneration: generation,
+				}));
+				for (const server of this.mcpServers)
+					this.emit({
+						type: "mcp.agentAvailabilityChanged",
+						serverId: server.profile.id,
+						availability: server.agentAvailability ?? "unknown",
+						toolGeneration: generation,
+					});
+			}
+		} catch (error) {
+			this.runtimeToolSet = {
+				...this.runtimeToolSet,
+				lastError: error instanceof Error ? error.message : String(error),
+			};
+			this.emit({
+				type: "runtime.toolsChanged",
+				snapshot: { ...this.runtimeToolSet, toolNames: [...this.runtimeToolSet.toolNames] },
+			});
+		}
+	}
+
+	private async inspectSkill(source: SkillSource) {
+		if (!this.skillService) throw new DesktopError("NOT_SUPPORTED", "Skill package management is unavailable");
+		return this.skillService.inspect(source, "global");
+	}
+
+	private async installSkill(source: SkillSource, scope: SkillInstallScope = "global", operationId?: string) {
+		if (!this.skillService) throw new DesktopError("NOT_SUPPORTED", "Skill package management is unavailable");
+		const installation = await this.skillService.install(source, scope, operationId);
+		this.skillInstallations = await this.skillService.list();
+		this.emit({ type: "skills.catalogChanged", installations: this.skillInstallations });
+		return installation;
+	}
+
+	private async importSkill(path: string, scope: SkillInstallScope = "global", operationId?: string) {
+		return this.installSkill({ kind: "local", spec: path }, scope, operationId);
+	}
+
+	private async removeSkill(installationId: string, operationId?: string): Promise<null> {
+		if (!this.skillService) throw new DesktopError("NOT_SUPPORTED", "Skill package management is unavailable");
+		const installation = this.skillInstallations.find((item) => item.id === installationId);
+		if (!installation) throw new DesktopError("NOT_FOUND", "Skill installation not found", { installationId });
+		await this.skillService.remove(installation, operationId);
+		this.skillInstallations = await this.skillService.list();
+		this.emit({ type: "skills.catalogChanged", installations: this.skillInstallations });
+		return null;
+	}
+
+	private async updateSkill(installationId: string, operationId?: string) {
+		const installation = this.skillInstallations.find((item) => item.id === installationId);
+		if (!installation) throw new DesktopError("NOT_FOUND", "Skill installation not found", { installationId });
+		return this.installSkill(installation.source, installation.scope, operationId);
 	}
 
 	private async reconcileMcp(): Promise<void> {
@@ -1287,6 +1567,7 @@ export class DesktopApplication {
 				continue;
 			}
 			const snapshot = await this.options.mcp.start(profile);
+			await this.persistResolvedMcpVersion(profile, snapshot);
 			this.mcpServers = this.options.mcp.list();
 			if (snapshot.status === "error")
 				this.recordDiagnostic("error", "mcp", snapshot.lastError ?? "MCP server failed");
@@ -1294,9 +1575,9 @@ export class DesktopApplication {
 		this.mcpServers = this.options.mcp.list();
 	}
 
-	private async createMcpServer(input: McpServerDraft): Promise<McpServerSnapshot> {
+	private async createMcpServer(input: McpServerDraft, profileId: string = randomUUID()): Promise<McpServerSnapshot> {
 		if (!this.options.mcp) throw new DesktopError("NOT_SUPPORTED", "MCP is unavailable");
-		const profile: McpServerProfile = { ...input, id: randomUUID(), args: [...input.args], env: { ...input.env } };
+		const profile: McpServerProfile = { ...input, id: profileId, args: [...input.args], env: { ...input.env } };
 		await this.options.metadata.saveMcpServer(profile);
 		this.mcpProfiles = await this.options.metadata.listMcpServers();
 		this.options.mcp.setProfiles(this.mcpProfiles);
@@ -1310,6 +1591,7 @@ export class DesktopApplication {
 						lastError: null,
 						startedAt: null,
 					});
+		await this.persistResolvedMcpVersion(profile, snapshot);
 		this.mcpServers = this.options.mcp.list();
 		return publicMcpSnapshot(snapshot);
 	}
@@ -1333,6 +1615,7 @@ export class DesktopApplication {
 			(updated.projectId === null || updated.projectId === this.activeProjectId)
 				? await this.options.mcp.start(updated)
 				: { profile: updated, status: "stopped" as const, toolCount: 0, lastError: null, startedAt: null };
+		await this.persistResolvedMcpVersion(updated, snapshot);
 		this.mcpServers = this.options.mcp?.list() ?? [];
 		return publicMcpSnapshot(snapshot);
 	}
@@ -1341,6 +1624,7 @@ export class DesktopApplication {
 		if (!this.mcpProfiles.some((profile) => profile.id === serverId))
 			throw new DesktopError("NOT_FOUND", "MCP server not found", { serverId });
 		await this.options.mcp?.stop(serverId, "server deleted");
+		await this.options.mcp?.removeManagedPackage?.(serverId);
 		await this.options.metadata.deleteMcpServer(serverId);
 		this.mcpProfiles = await this.options.metadata.listMcpServers();
 		this.options.mcp?.setProfiles(this.mcpProfiles);
@@ -1356,6 +1640,137 @@ export class DesktopApplication {
 		const profile = this.mcpProfiles.find((candidate) => candidate.id === serverId);
 		if (!profile || !this.options.mcp) throw new DesktopError("NOT_FOUND", "MCP server not found", { serverId });
 		return publicMcpSnapshot(await this.options.mcp.test(profile));
+	}
+
+	private async retryMcpServer(serverId: string): Promise<McpServerSnapshot> {
+		const profile = this.mcpProfiles.find((candidate) => candidate.id === serverId);
+		if (!profile || !this.options.mcp) throw new DesktopError("NOT_FOUND", "MCP server not found", { serverId });
+		const snapshot = await this.options.mcp.start(profile);
+		await this.persistResolvedMcpVersion(profile, snapshot);
+		this.mcpServers = this.options.mcp.list();
+		return publicMcpSnapshot(snapshot);
+	}
+
+	private async testAndSaveMcp(profile: McpServerDraft): Promise<McpServerSnapshot> {
+		if (!this.options.mcp) throw new DesktopError("NOT_SUPPORTED", "MCP is unavailable");
+		const preview = { ...profile, id: randomUUID(), args: [...profile.args], env: { ...profile.env } };
+		const tested = await this.options.mcp.test(preview);
+		if (tested.status !== "ready") return publicMcpSnapshot(tested);
+		return this.createMcpServer({
+			...profile,
+			packageVersion: tested.profile.packageVersion ?? profile.packageVersion,
+		});
+	}
+
+	private async persistResolvedMcpVersion(profile: McpServerProfile, snapshot: McpServerSnapshot): Promise<void> {
+		const resolvedVersion = snapshot.profile.packageVersion;
+		const launchKind = profile.launchKind ?? (profile.command === "npx" ? "managed-npm" : undefined);
+		if (launchKind !== "managed-npm" || !resolvedVersion || resolvedVersion === profile.packageVersion) return;
+		const updated = { ...profile, packageVersion: resolvedVersion };
+		await this.options.metadata.saveMcpServer(updated);
+		this.mcpProfiles = this.mcpProfiles.map((candidate) => (candidate.id === profile.id ? updated : candidate));
+	}
+
+	private async inspectMcp(source: string): Promise<Record<string, unknown>> {
+		const normalized = normalizeMcpProfileSource(source);
+		return {
+			source,
+			normalized,
+			risks:
+				normalized.launchKind === "executable" ? ["Executes a local process"] : ["May download third-party code"],
+		};
+	}
+
+	private async installMcpFromAgent(profile: McpServerDraft): Promise<McpServerSnapshot> {
+		const profileId = randomUUID();
+		try {
+			const snapshot = await this.createMcpServer({ ...profile, enabled: true }, profileId);
+			if (snapshot.status !== "ready")
+				throw new DesktopError("PROCESS_ERROR", snapshot.lastError ?? "MCP server did not become ready");
+			return snapshot;
+		} catch (error) {
+			if (this.mcpProfiles.some((candidate) => candidate.id === profileId)) await this.deleteMcpServer(profileId);
+			throw error;
+		}
+	}
+
+	private requestApproval(request: Omit<DesktopApprovalRequest, "requestId" | "createdAt">): Promise<boolean> {
+		const fullRequest: DesktopApprovalRequest = {
+			...request,
+			requestId: randomUUID(),
+			createdAt: now(),
+			risks: [...request.risks],
+		};
+		return new Promise<boolean>((resolve) => {
+			const timer = setTimeout(() => this.resolveApproval(fullRequest.requestId, false), 120_000);
+			this.pendingApprovals.set(fullRequest.requestId, { resolve, timer });
+			this.approvalRequests.push(fullRequest);
+			this.emit({ type: "approval.required", request: { ...fullRequest, risks: [...fullRequest.risks] } });
+		});
+	}
+
+	private respondApproval(requestId: string, approved: boolean): boolean {
+		if (!this.pendingApprovals.has(requestId)) return false;
+		this.resolveApproval(requestId, approved);
+		return true;
+	}
+
+	private resolveApproval(requestId: string, approved: boolean): void {
+		const pending = this.pendingApprovals.get(requestId);
+		if (!pending) return;
+		this.pendingApprovals.delete(requestId);
+		clearTimeout(pending.timer);
+		this.approvalRequests = this.approvalRequests.filter((request) => request.requestId !== requestId);
+		pending.resolve(approved);
+		this.emit({ type: "approval.resolved", requestId, approved });
+	}
+
+	private async importMcp(json: string, scope: "global" | "project" = "project"): Promise<McpServerSnapshot[]> {
+		const parsed = JSON.parse(json) as { mcpServers?: Record<string, Record<string, unknown>> };
+		if (!parsed.mcpServers || typeof parsed.mcpServers !== "object")
+			throw new DesktopError("INVALID_ARGUMENT", "MCP JSON must contain mcpServers");
+		const result: McpServerSnapshot[] = [];
+		for (const [name, value] of Object.entries(parsed.mcpServers)) {
+			let profile: McpServerDraft = normalizeMcpProfileSource(JSON.stringify({ name, ...value }));
+			profile = await this.protectImportedMcpSecrets(profile, value);
+			result.push(
+				await this.createMcpServer({
+					...profile,
+					projectId: scope === "project" ? this.activeProjectId : null,
+					scope,
+				}),
+			);
+		}
+		return result;
+	}
+
+	private async protectImportedMcpSecrets(
+		profile: McpServerDraft,
+		input: Record<string, unknown>,
+	): Promise<McpServerDraft> {
+		const env =
+			typeof input.env === "object" && input.env !== null
+				? Object.fromEntries(
+						Object.entries(input.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+					)
+				: {};
+		const headers =
+			typeof input.headers === "object" && input.headers !== null
+				? Object.fromEntries(
+						Object.entries(input.headers).filter(
+							(entry): entry is [string, string] => typeof entry[1] === "string",
+						),
+					)
+				: {};
+		if ((Object.keys(env).length > 0 || Object.keys(headers).length > 0) && !this.options.secrets)
+			throw new DesktopError("NOT_SUPPORTED", "Secret storage is required to import MCP environment or headers");
+		const secretEnvRefs = { ...(profile.secretEnvRefs ?? {}) };
+		const secretHeaderRefs = { ...(profile.secretHeaderRefs ?? {}) };
+		for (const [name, value] of Object.entries(env))
+			secretEnvRefs[name] = await (this.options.secrets as SecretStore).set(value);
+		for (const [name, value] of Object.entries(headers))
+			secretHeaderRefs[name] = await (this.options.secrets as SecretStore).set(value);
+		return { ...profile, env: {}, secretEnvRefs, secretHeaderRefs };
 	}
 
 	private async refreshRuntimeMessages(): Promise<void> {
@@ -1619,19 +2034,19 @@ export class DesktopApplication {
 		if (event.snapshot) {
 			const publicSnapshot = publicMcpSnapshot(event.snapshot);
 			this.emit({ type: "mcp.serverChanged", server: publicSnapshot });
+			this.emit({ type: "mcp.connectionChanged", server: publicSnapshot });
 		} else if (event.serverId) {
 			const snapshot = this.mcpServers.find((candidate) => candidate.profile.id === event.serverId);
-			if (snapshot) this.emit({ type: "mcp.serverChanged", server: publicMcpSnapshot(snapshot) });
+			if (snapshot) {
+				const publicSnapshot = publicMcpSnapshot(snapshot);
+				this.emit({ type: "mcp.serverChanged", server: publicSnapshot });
+				this.emit({ type: "mcp.connectionChanged", server: publicSnapshot });
+			}
 		}
 		if (event.tools) {
 			const tools = event.tools.map((tool) => ({ ...tool, inputSchema: { ...tool.inputSchema } }));
 			this.emit({ type: "mcp.toolsChanged", tools });
-			const project = this.projects.find((candidate) => candidate.id === this.activeProjectId);
-			const definitions = this.options.mcp?.listToolDefinitions?.(
-				this.activeProjectId ?? undefined,
-				project?.trustState === "trusted",
-			);
-			if (definitions && this.runtimePort.setTools) void this.runtimePort.setTools(definitions);
+			void this.applyRuntimeTools();
 		}
 		if (event.type === "server.error" && event.error) this.recordDiagnostic("error", "mcp", event.error);
 		if (event.type === "consent.required" && event.request) {

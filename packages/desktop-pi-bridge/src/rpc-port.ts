@@ -17,6 +17,7 @@ import { DesktopError } from "@earendil-works/pi-desktop-protocol";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import { normalizeCommands, normalizeMessage, normalizePiEvent, normalizeState } from "./normalize.ts";
 import type { RpcCommand, RpcResponse } from "./rpc-types.ts";
+import { PiToolBridge } from "./tool-bridge.ts";
 
 function resolveDefaultRpcEntry(): string {
 	return fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent/rpc-entry"));
@@ -36,6 +37,8 @@ export interface RpcPiAgentPortOptions {
 	args?: string[];
 	env?: Record<string, string>;
 	requestTimeoutMs?: number;
+	enableToolBridge?: boolean;
+	toolBridgeExtensionPath?: string;
 }
 
 function responseData(response: RpcResponse): unknown {
@@ -107,6 +110,7 @@ export class RpcPiAgentPort implements PiAgentPort {
 	private runtimeOptions: PiRuntimeOptions | undefined;
 	private streamingMessageId: string | undefined;
 	private tools: RuntimeToolDefinition[] = [];
+	private toolBridge: PiToolBridge | undefined;
 
 	constructor(options: RpcPiAgentPortOptions = {}) {
 		this.options = options;
@@ -116,6 +120,21 @@ export class RpcPiAgentPort implements PiAgentPort {
 		await this.stop();
 		this.runtimeOptions = options;
 		this.tools = [...(options.tools ?? [])];
+		const bridgeEnabled = this.options.enableToolBridge === true;
+		let bridgeEnvironment: Record<string, string> = {};
+		let spawnArgs = [...(this.options.args ?? [resolveDefaultRpcEntry()])];
+		if (bridgeEnabled) {
+			this.toolBridge = new PiToolBridge({ timeoutMs: this.options.requestTimeoutMs ?? 10_000 });
+			const endpoint = await this.toolBridge.listen();
+			const extensionPath =
+				this.options.toolBridgeExtensionPath ??
+				fileURLToPath(new URL("./tool-bridge-extension.ts", import.meta.url));
+			bridgeEnvironment = {
+				PI_DESKTOP_TOOL_BRIDGE_PORT: String(endpoint.port),
+				PI_DESKTOP_TOOL_BRIDGE_TOKEN: endpoint.token,
+			};
+			spawnArgs = [...spawnArgs, "--extension", extensionPath];
+		}
 		const modelConfig = buildPiModelsJson(options);
 		this.sensitiveValues = modelConfig.secrets;
 		await mkdir(options.agentDirectory, { recursive: true, mode: 0o700 });
@@ -125,7 +144,7 @@ export class RpcPiAgentPort implements PiAgentPort {
 			mode: 0o600,
 		});
 		const command = this.options.command ?? process.execPath;
-		const args = [...(this.options.args ?? [resolveDefaultRpcEntry()])];
+		const args = [...spawnArgs];
 		args.push("--session-dir", options.sessionDirectory);
 		const sessionPath = options.sessionPath ?? options.sessionRef ?? undefined;
 		if (sessionPath && existsSync(sessionPath)) args.push("--session", sessionPath);
@@ -140,11 +159,13 @@ export class RpcPiAgentPort implements PiAgentPort {
 			env: {
 				...process.env,
 				...this.options.env,
+				...bridgeEnvironment,
 				PI_CODING_AGENT_DIR: options.agentDirectory,
 				...modelConfig.env,
 				...options.env,
 			},
 			stdio: ["pipe", "pipe", "pipe"],
+			windowsHide: true,
 		});
 		this.process = child;
 		this.sensitiveValues = [...modelConfig.secrets, ...options.sensitiveValues];
@@ -170,6 +191,10 @@ export class RpcPiAgentPort implements PiAgentPort {
 		if (Array.isArray(messages)) this.state.messageCount = messages.length;
 		await this.send({ type: "get_commands" });
 		await this.send({ type: "set_thinking_level", level: options.thinkingLevel });
+		if (this.toolBridge) {
+			await this.toolBridge.waitForHello();
+			await this.toolBridge.replace(this.tools);
+		}
 		this.state.thinkingLevel = options.thinkingLevel;
 		this.emit({ type: "ready", runtimeId: options.runtimeId, state: { ...this.state } });
 		return { ...this.state };
@@ -183,6 +208,8 @@ export class RpcPiAgentPort implements PiAgentPort {
 		this.stopReader?.();
 		this.stopReader = undefined;
 		this.rejectPending(new Error("Pi RPC process stopped"));
+		await this.toolBridge?.close().catch(() => undefined);
+		this.toolBridge = undefined;
 		if (child.exitCode !== null) return;
 		await new Promise<void>((resolve) => {
 			const timer = setTimeout(() => {
@@ -252,8 +279,9 @@ export class RpcPiAgentPort implements PiAgentPort {
 		this.state.modelId = modelId;
 	}
 
-	setTools(tools: readonly RuntimeToolDefinition[]): void {
+	async setTools(tools: readonly RuntimeToolDefinition[]): Promise<void> {
 		this.tools = tools.map((tool) => ({ ...tool }));
+		if (this.toolBridge) await this.toolBridge.replace(this.tools);
 	}
 
 	subscribe(listener: (event: PiAgentEvent) => void): () => void {

@@ -122,28 +122,35 @@ export class RecoveringPiAgentPort implements PiAgentPort {
 		this.recovering = true;
 		try {
 			while (!this.stopping && this.runtimeOptions && this.attempts < this.maxAttempts) {
+				const options: PiRuntimeOptions = this.runtimeOptions;
 				this.attempts += 1;
 				this.emit({
 					type: "diagnostic",
-					runtimeId: this.runtimeOptions.runtimeId,
+					runtimeId: options.runtimeId,
 					level: "warning",
 					message: `Restarting Pi runtime after crash (attempt ${this.attempts}/${this.maxAttempts})`,
 				});
 				await new Promise<void>((resolve) => setTimeout(resolve, this.baseDelayMs * 2 ** (this.attempts - 1)));
+				// The runtime may have been stopped or replaced while we were waiting.
+				if (this.stopping || this.runtimeOptions !== options) return;
 				try {
-					const state = await this.inner.start(this.runtimeOptions);
+					const state = await this.inner.start(options);
+					if (this.stopping || this.runtimeOptions !== options) return;
 					this.rememberSession(state);
 					this.attempts = 0;
 					return;
 				} catch (error: unknown) {
+					if (this.stopping || this.runtimeOptions !== options) return;
 					this.emit({
 						type: "diagnostic",
-						runtimeId: this.runtimeOptions.runtimeId,
+						runtimeId: options.runtimeId,
 						level: "error",
 						message: error instanceof Error ? error.message : String(error),
 					});
 				}
 			}
+		} catch {
+			// Recovery must never take down the host process.
 		} finally {
 			this.recovering = false;
 		}

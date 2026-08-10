@@ -1,4 +1,5 @@
 import type {
+	DesktopApprovalRequest,
 	DesktopMessage,
 	Diagnostic,
 	McpConsentRequest,
@@ -6,7 +7,10 @@ import type {
 	McpTool,
 	RuntimeIdentity,
 	RuntimeSnapshot,
+	RuntimeToolSetSnapshot,
 	SkillCommand,
+	SkillInstallationSnapshot,
+	SkillInstallProgress,
 	WindowState,
 } from "./types.ts";
 
@@ -25,10 +29,23 @@ export type DesktopEvent =
 	| ({ type: "tool.update"; messageId: string; toolCallId: string; text: string } & RuntimeIdentity)
 	| ({ type: "tool.finished"; messageId: string; toolCallId: string; text: string; failed: boolean } & RuntimeIdentity)
 	| ({ type: "skills.changed"; commands: SkillCommand[] } & RuntimeIdentity)
+	| { type: "skills.installProgress"; progress: SkillInstallProgress }
+	| { type: "skills.catalogChanged"; installations: SkillInstallationSnapshot[] }
+	| { type: "skills.operationFailed"; operationId: string; error: string }
 	| { type: "mcp.serverChanged"; server: McpServerSnapshot }
 	| { type: "mcp.toolsChanged"; tools: McpTool[] }
+	| { type: "mcp.connectionChanged"; server: McpServerSnapshot }
+	| {
+			type: "mcp.agentAvailabilityChanged";
+			serverId: string;
+			availability: McpServerSnapshot["agentAvailability"];
+			toolGeneration?: number | null;
+	  }
+	| { type: "runtime.toolsChanged"; snapshot: RuntimeToolSetSnapshot }
 	| { type: "mcp.consentRequired"; request: McpConsentRequest }
 	| { type: "mcp.consentResolved"; requestId: string; approved: boolean }
+	| { type: "approval.required"; request: DesktopApprovalRequest }
+	| { type: "approval.resolved"; requestId: string; approved: boolean }
 	| ({ type: "diagnostic"; diagnostic: Diagnostic } & RuntimeIdentity);
 
 export type DesktopEventListener = (event: DesktopEvent) => void;

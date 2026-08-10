@@ -29,7 +29,10 @@ export class PiRuntimeAdapter implements AgentRuntimePort {
 	private readonly runtime: RecoveringPiAgentPort;
 
 	constructor(options: PiRuntimeAdapterOptions = {}) {
-		this.runtime = new RecoveringPiAgentPort(new RpcPiAgentPort(options.rpc), options.recovery);
+		this.runtime = new RecoveringPiAgentPort(
+			new RpcPiAgentPort({ ...options.rpc, enableToolBridge: options.rpc?.enableToolBridge ?? true }),
+			options.recovery,
+		);
 	}
 
 	start(options: RuntimeStartOptions) {

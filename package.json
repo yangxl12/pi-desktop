@@ -3,7 +3,10 @@
 	"version": "0.1.0",
 	"private": true,
 	"type": "module",
-	"workspaces": ["apps/*", "packages/*"],
+	"workspaces": [
+		"apps/*",
+		"packages/*"
+	],
 	"scripts": {
 		"check": "npm run check:decoupling && biome check --write --error-on-warnings . && tsgo --noEmit",
 		"check:decoupling": "node scripts/check-pi-decoupling.mjs",

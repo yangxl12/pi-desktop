@@ -1,8 +1,12 @@
 import { spawn } from "node:child_process";
 import { access, cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const root = resolve("../..");
 const appDirectory = resolve(".");
@@ -11,7 +15,7 @@ const piPackageDirectory = resolve(dirname(piRpcEntry), "..");
 const workDirectory = resolve("../../.pi-dev/desktop-dev");
 const resourcesDirectory = join(workDirectory, "resources");
 const appResources = join(resourcesDirectory, "app");
-const dataDirectory = resolve("../../.pi-dev/desktop-data");
+const dataDirectory = resolve(process.env.PI_DESKTOP_DATA_DIR ?? "../../.pi-dev/desktop-data");
 
 if (!workDirectory.startsWith(root) || !dataDirectory.startsWith(root))
 	throw new Error("Development paths must stay inside the workspace");
@@ -34,6 +38,16 @@ await build({ ...common, entryPoints: [join(root, "apps/desktop/src/electron/mai
 await build({ ...common, entryPoints: [join(root, "apps/desktop/src/host/main.ts")], outfile: join(appResources, "host.mjs") });
 await build({ ...common, entryPoints: [piRpcEntry], outfile: join(appResources, "rpc-entry.mjs") });
 await build({ ...common, entryPoints: [join(appDirectory, "src", "extensions", "web-search.ts")], outfile: join(appResources, "extensions", "web-search.mjs") });
+await build({
+	...common,
+	entryPoints: [join(root, "packages", "desktop-pi-bridge", "src", "tool-bridge-extension.ts")],
+	outfile: join(appResources, "extensions", "tool-bridge.mjs"),
+});
+await execFileAsync(process.execPath, [join(appDirectory, "scripts", "package-sidecar.mjs"), join(appResources, "sidecar")], {
+	cwd: root,
+	windowsHide: true,
+	env: process.env,
+});
 await cp(join(piPackageDirectory, "dist", "modes", "interactive", "theme"), join(appResources, "dist", "modes", "interactive", "theme"), { recursive: true });
 await access(join(appResources, "dist", "modes", "interactive", "theme", "dark.json"));
 await cp(join(appDirectory, "src", "renderer"), join(appResources, "renderer"), { recursive: true });

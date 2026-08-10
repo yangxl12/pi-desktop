@@ -223,7 +223,9 @@ export function createElectronDesktopPorts(): ElectronDesktopPorts | undefined {
 	if (!token || !process.send) return undefined;
 	const transport: ElectronShellTransport = {
 		send(message) {
-			if (!process.send?.(message)) throw new Error("Electron shell IPC channel is unavailable");
+			if (!process.send || process.connected === false) throw new Error("Electron shell IPC channel is unavailable");
+			// A false return means IPC backpressure, not that the message was rejected.
+			process.send(message);
 		},
 		onMessage(listener) {
 			const onMessage = (message: unknown) => listener(message);

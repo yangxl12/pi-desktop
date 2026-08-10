@@ -1,4 +1,5 @@
 import { createElement, icons } from "/vendor/lucide/lucide.mjs";
+import { commandTokenAtCaret, cycleSelection, filterSlashCommands, replaceCommandToken } from "/slash-menu.mjs";
 
 let desktopState = null;
 let settingsOpen = false;
@@ -7,6 +8,7 @@ let editingModelId = null;
 let selectedQueue = null;
 let slashItems = [];
 let slashIndex = 0;
+let slashComposition = false;
 let toastTimer;
 let eventSource;
 let fallbackRefreshTimer;
@@ -98,6 +100,8 @@ const translations = {
 		"settings.modelId": "模型 ID",
 		"settings.profiles": "配置列表",
 		"settings.directories": "目录",
+		"settings.skillSources": "npm / Git / URL",
+		"settings.update": "更新",
 		"settings.enabled": "启用",
 		"settings.cancel": "取消",
 		"settings.default": "设为默认模型",
@@ -109,7 +113,10 @@ const translations = {
 		"settings.export": "导出诊断",
 		"settings.add": "添加",
 		"settings.noMcp": "没有 MCP 服务",
+		"settings.revokePermissions": "撤销当前项目的 MCP 授权",
 		"settings.addServer": "添加服务",
+		"settings.importJson": "导入 MCP JSON",
+		"settings.scope": "范围",
 		"settings.namespace": "命名空间",
 		"settings.transport": "传输方式",
 		"settings.command": "命令",
@@ -126,11 +133,27 @@ const translations = {
 		"toast.windowSaved": "窗口行为已保存",
 		"toast.skillAdded": "技能目录已添加",
 		"toast.skillRemoved": "技能目录已移除",
+		"toast.skillUpdated": "技能已更新",
 		"toast.skillsRescanned": "技能已重新扫描",
 		"toast.mcpUpdated": "MCP 服务已更新",
 		"toast.mcpDeleted": "MCP 服务已删除",
 		"toast.mcpConnected": "MCP 连接成功",
 		"toast.mcpFailed": "MCP 连接失败",
+		"toast.mcpPermissionsRevoked": "MCP 授权已撤销",
+		"consent.title": "MCP 工具授权",
+		"consent.description": "此工具将在受限项目中执行。请选择授权范围。",
+		"consent.server": "服务",
+		"consent.tool": "工具",
+		"consent.arguments": "参数摘要",
+		"consent.deny": "拒绝",
+		"consent.once": "仅此一次",
+		"consent.session": "本次会话",
+		"consent.project": "此项目",
+		"approval.title": "确认桌面端操作",
+		"approval.description": "Agent 请求执行会修改本地配置或运行第三方代码的操作。",
+		"approval.risks": "风险",
+		"approval.reject": "拒绝",
+		"approval.approve": "批准",
 		"confirm.deleteModel": "删除此模型配置？",
 		"confirm.deleteMcp": "删除此 MCP 服务？",
 		"prompt.sessionName": "对话名称",
@@ -228,6 +251,8 @@ const translations = {
 		"settings.modelId": "Model ID",
 		"settings.profiles": "Profiles",
 		"settings.directories": "Directories",
+		"settings.skillSources": "npm / Git / URL",
+		"settings.update": "Update",
 		"settings.enabled": "Enabled",
 		"settings.cancel": "Cancel",
 		"settings.default": "Set as default",
@@ -239,7 +264,10 @@ const translations = {
 		"settings.export": "Export diagnostics",
 		"settings.add": "Add",
 		"settings.noMcp": "No MCP servers",
+		"settings.revokePermissions": "Revoke MCP grants for this project",
 		"settings.addServer": "Add server",
+		"settings.importJson": "Import MCP JSON",
+		"settings.scope": "Scope",
 		"settings.namespace": "Namespace",
 		"settings.transport": "Transport",
 		"settings.command": "Command",
@@ -256,11 +284,27 @@ const translations = {
 		"toast.windowSaved": "Window behavior saved",
 		"toast.skillAdded": "Skill directory added",
 		"toast.skillRemoved": "Skill directory removed",
+		"toast.skillUpdated": "Skill updated",
 		"toast.skillsRescanned": "Skills rescanned",
 		"toast.mcpUpdated": "MCP server updated",
 		"toast.mcpDeleted": "MCP server deleted",
 		"toast.mcpConnected": "MCP connection successful",
 		"toast.mcpFailed": "MCP connection failed",
+		"toast.mcpPermissionsRevoked": "MCP grants revoked",
+		"consent.title": "MCP tool permission",
+		"consent.description": "This tool will run in a restricted project. Choose the permission scope.",
+		"consent.server": "Server",
+		"consent.tool": "Tool",
+		"consent.arguments": "Arguments",
+		"consent.deny": "Deny",
+		"consent.once": "Allow once",
+		"consent.session": "This session",
+		"consent.project": "This project",
+		"approval.title": "Confirm desktop operation",
+		"approval.description": "The Agent requested an operation that changes local configuration or runs third-party code.",
+		"approval.risks": "Risks",
+		"approval.reject": "Reject",
+		"approval.approve": "Approve",
 		"confirm.deleteModel": "Delete this model profile?",
 		"confirm.deleteMcp": "Delete this MCP server?",
 		"prompt.sessionName": "Session name",
@@ -614,14 +658,17 @@ function renderComposer() {
 }
 
 function updateSlashItems() {
-	const text = byId("prompt-input").value;
-	if (!text.startsWith("/") || text.includes("\n")) {
+	const input = byId("prompt-input");
+	const token = slashComposition ? null : commandTokenAtCaret(input.value, input.selectionStart ?? input.value.length);
+	if (!token) {
 		slashItems = [];
 		slashIndex = 0;
 		return;
 	}
-	const query = text.slice(1).toLowerCase();
-	slashItems = desktopState.commands.filter((commandInfo) => commandInfo.name.toLowerCase().includes(query)).slice(0, 8);
+	const selectedName = slashItems[slashIndex]?.name;
+	slashItems = filterSlashCommands(desktopState.commands, token.query, 10);
+	const previousIndex = slashItems.findIndex((item) => item.name === selectedName);
+	if (previousIndex >= 0) slashIndex = previousIndex;
 	if (slashIndex >= slashItems.length) slashIndex = 0;
 }
 
@@ -630,10 +677,24 @@ function renderSlashMenu() {
 	const menu = byId("slash-menu");
 	if (slashItems.length === 0) {
 		menu.classList.add("hidden");
+		byId("prompt-input").setAttribute("aria-expanded", "false");
+		byId("prompt-input").removeAttribute("aria-activedescendant");
 		return;
 	}
 	menu.classList.remove("hidden");
-	menu.innerHTML = slashItems.map((commandInfo, index) => `<div class="slash-item ${index === slashIndex ? "selected" : ""}" data-action="select-command" data-command="${escapeHtml(commandInfo.name)}"><strong>/${escapeHtml(commandInfo.name)}</strong><span>${escapeHtml(commandInfo.description ?? commandInfo.source)}${commandInfo.scope ? ` / ${escapeHtml(commandInfo.scope)}` : ""}</span></div>`).join("");
+	menu.innerHTML = slashItems.map((commandInfo, index) => `<div id="slash-option-${index}" role="option" aria-selected="${index === slashIndex}" class="slash-item ${index === slashIndex ? "selected" : ""}" data-action="select-command" data-command="${escapeHtml(commandInfo.name)}" data-slash-index="${index}"><strong>/${escapeHtml(commandInfo.name)}</strong><span>${escapeHtml(commandInfo.description ?? commandInfo.source)}${commandInfo.scope ? ` / ${escapeHtml(commandInfo.scope)}` : ""}</span></div>`).join("");
+	syncSlashSelection();
+}
+
+function syncSlashSelection() {
+	const input = byId("prompt-input");
+	input.setAttribute("aria-expanded", "true");
+	input.setAttribute("aria-activedescendant", `slash-option-${slashIndex}`);
+	for (const option of byId("slash-menu").querySelectorAll("[data-slash-index]")) {
+		const selected = Number(option.dataset.slashIndex) === slashIndex;
+		option.setAttribute("aria-selected", String(selected));
+		option.classList.toggle("selected", selected);
+	}
 }
 
 function renderSettings() {
@@ -682,9 +743,10 @@ function renderGeneralSettings(content) {
 
 function renderSkillsSettings(content) {
 	const skills = desktopState.commands.filter((commandInfo) => commandInfo.source === "skill");
+	const installations = desktopState.skillInstallations ?? [];
 	content.innerHTML = `<section class="settings-section"><h2>${t("settings.skills")}</h2><p>${skills.length} ${t("settings.configured")}</p>
-		<div class="settings-card"><h3>${t("settings.directories")}</h3><form id="skill-directory-form" class="form-grid"><label class="form-field full"><input name="directory" required placeholder="SKILL.md"></label><div class="form-actions full"><button class="text-button primary" type="submit"><span data-icon="plus"></span> ${t("settings.add")}</button></div></form>${desktopState.settings.skillDirectories.map((directory) => `<div class="directory-row"><span title="${escapeHtml(directory)}">${escapeHtml(directory)}</span><button class="icon-button" data-action="remove-skill-directory" data-directory="${escapeHtml(directory)}" title="${t("settings.delete")}" aria-label="${t("settings.delete")}"><span data-icon="x"></span></button></div>`).join("")}<div class="form-actions"><button class="text-button" data-action="reload-skills"><span data-icon="refresh-cw"></span> ${t("settings.rescan")}</button></div></div>
-		<div class="settings-card"><h3>${t("settings.loadedCommands")}</h3>${skills.length === 0 ? `<div class="muted">${t("settings.noSkills")}</div>` : skills.map((skill) => `<div class="directory-row"><span><strong>/${escapeHtml(skill.name)}</strong><br><span class="muted">${escapeHtml(skill.description ?? "")}</span></span><span class="trust-pill ${escapeHtml(skill.scope ?? "temporary")}">${escapeHtml(skill.scope ?? "temporary")}</span></div>`).join("")}</div>
+		<div class="settings-card"><h3>${t("settings.add")}</h3><form id="skill-install-form" class="form-grid"><label class="form-field full"><span>${t("settings.skillSources")}</span><input name="source" required placeholder="npm:author/skill@1.0.0" aria-label="Skill source"></label><label class="form-field"><span>Scope</span><select name="scope"><option value="global">Global</option><option value="project">Project</option></select></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="download"></span>${t("settings.add")}</button></div></form><form id="skill-directory-form" class="form-grid"><label class="form-field full"><span>${t("settings.directories")}</span><input name="directory" required placeholder="SKILL.md" aria-label="Skill directory"></label><div class="form-actions full"><button class="text-button" type="submit"><span data-icon="folder-plus"></span>${t("settings.add")}</button></div></form>${desktopState.settings.skillDirectories.map((directory) => `<div class="directory-row"><span title="${escapeHtml(directory)}">${escapeHtml(directory)}</span><button class="icon-button" data-action="remove-skill-directory" data-directory="${escapeHtml(directory)}" title="${t("settings.delete")}" aria-label="${t("settings.delete")}"><span data-icon="x"></span></button></div>`).join("")}<div class="form-actions"><button class="text-button" data-action="reload-skills"><span data-icon="refresh-cw"></span>${t("settings.rescan")}</button></div></div>
+		<div class="settings-card"><h3>${t("settings.loadedCommands")}</h3>${installations.length === 0 && skills.length === 0 ? `<div class="muted">${t("settings.noSkills")}</div>` : (installations.length ? installations : skills).map((skill) => `<div class="directory-row"><span><strong>/${escapeHtml(skill.name ?? skill.commandName?.replace("skill:", "") ?? "")}</strong><br><span class="muted">${escapeHtml(skill.description ?? "")}</span><small>${escapeHtml(skill.status ?? "loaded")} / ${escapeHtml(skill.source?.spec ?? skill.path ?? "")}</small></span>${skill.id ? `<span class="model-actions"><button class="icon-button" data-action="update-skill" data-installation-id="${escapeHtml(skill.id)}" title="${t("settings.update")}" aria-label="${t("settings.update")}"><span data-icon="refresh-cw"></span></button><button class="icon-button" data-action="remove-skill" data-installation-id="${escapeHtml(skill.id)}" title="${t("settings.delete")}" aria-label="${t("settings.delete")}"><span data-icon="trash-2"></span></button></span>` : `<span class="trust-pill">${escapeHtml(skill.scope ?? "temporary")}</span>`}</div>`).join("")}</div>
 	</section>`;
 }
 
@@ -695,14 +757,44 @@ function renderMcpSettings(content) {
 			<label class="form-field"><span>${t("settings.name")}</span><input name="name" required placeholder="Filesystem"></label>
 			<label class="form-field"><span>${t("settings.namespace")}</span><input name="namespace" required pattern="[A-Za-z][A-Za-z0-9_-]*" placeholder="filesystem"></label>
 			<label class="form-field"><span>${t("settings.transport")}</span><select name="transport"><option value="stdio">STDIO</option><option value="http">HTTP</option></select></label>
+			<label class="form-field"><span>${t("settings.scope")}</span><select name="scope"><option value="project">Project</option><option value="global">Global</option></select></label>
 			<label class="form-field"><span>${t("settings.command")}</span><input name="command" placeholder="npx"></label>
 			<label class="form-field full"><span>${t("settings.arguments")}</span><textarea name="args" rows="2" placeholder="-y\n@modelcontextprotocol/server-filesystem"></textarea></label>
 			<label class="form-field full"><span>${t("settings.httpUrl")}</span><input name="url" type="url" placeholder="https://localhost:3000/mcp"></label>
 			<label class="form-field"><span><input name="enabled" type="checkbox" checked> ${t("settings.enabled")}</span></label>
 			<div class="form-actions full"><button class="text-button primary" type="submit"><span data-icon="plus"></span>${t("settings.addServer")}</button></div>
 		</form></div>
-		<div class="settings-card"><h3>${t("settings.profiles")}</h3>${servers.length === 0 ? `<div class="muted">${t("settings.noMcp")}</div>` : servers.map((server) => `<div class="model-row"><div class="model-info"><strong>${escapeHtml(server.profile.name)} / ${escapeHtml(server.status)}</strong><span>${escapeHtml(server.profile.transport)} / ${escapeHtml(server.profile.namespace)} / ${server.toolCount} tools${server.lastError ? ` / ${escapeHtml(server.lastError)}` : ""}</span></div><div class="model-actions"><button class="icon-button" data-action="toggle-mcp" data-server-id="${escapeHtml(server.profile.id)}" title="${t("settings.enabled")}" aria-label="${t("settings.enabled")}"><span data-icon="${server.profile.enabled ? "pause" : "play"}"></span></button><button class="icon-button" data-action="test-mcp" data-server-id="${escapeHtml(server.profile.id)}" title="${t("settings.test")}" aria-label="${t("settings.test")}"><span data-icon="plug-zap"></span></button><button class="icon-button" data-action="delete-mcp" data-server-id="${escapeHtml(server.profile.id)}" title="${t("settings.delete")}" aria-label="${t("settings.delete")}"><span data-icon="trash-2"></span></button></div></div>`).join("")}</div>
+		<div class="settings-card"><h3>${t("settings.importJson")}</h3><form id="mcp-import-form" class="form-grid"><label class="form-field full"><textarea name="json" rows="5" required placeholder='{"mcpServers":{"filesystem":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}}}'></textarea></label><label class="form-field"><span>${t("settings.scope")}</span><select name="scope"><option value="project">Project</option><option value="global">Global</option></select></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="file-input"></span>${t("settings.importJson")}</button></div></form></div>
+		<div class="settings-card"><h3>${t("settings.profiles")}</h3>${servers.length === 0 ? `<div class="muted">${t("settings.noMcp")}</div>` : servers.map((server) => `<div class="model-row"><div class="model-info"><strong>${escapeHtml(server.profile.name)} / ${escapeHtml(server.status)}</strong><span>${escapeHtml(server.profile.launchKind ?? server.profile.transport)} / ${escapeHtml(server.profile.namespace)} / ${server.toolCount} tools / agent: ${escapeHtml(server.agentAvailability ?? "unknown")}${server.lastError ? ` / ${escapeHtml(server.lastError)}` : ""}</span></div><div class="model-actions"><button class="icon-button" data-action="toggle-mcp" data-server-id="${escapeHtml(server.profile.id)}" title="${t("settings.enabled")}" aria-label="${t("settings.enabled")}"><span data-icon="${server.profile.enabled ? "pause" : "play"}"></span></button><button class="icon-button" data-action="test-mcp" data-server-id="${escapeHtml(server.profile.id)}" title="${t("settings.test")}" aria-label="${t("settings.test")}"><span data-icon="plug-zap"></span></button><button class="icon-button" data-action="retry-mcp" data-server-id="${escapeHtml(server.profile.id)}" title="Retry" aria-label="Retry"><span data-icon="refresh-cw"></span></button><button class="icon-button" data-action="delete-mcp" data-server-id="${escapeHtml(server.profile.id)}" title="${t("settings.delete")}" aria-label="${t("settings.delete")}"><span data-icon="trash-2"></span></button></div></div>`).join("")}</div>
+		<div class="form-actions"><button class="text-button" data-action="revoke-mcp-consent"><span data-icon="shield-x"></span>${t("settings.revokePermissions")}</button></div>
 	</section>`;
+}
+
+function renderConsentModal() {
+	const backdrop = byId("consent-modal");
+	const dialog = backdrop.querySelector(".consent-dialog");
+	const approval = desktopState.approvalRequests?.[0];
+	const request = desktopState.consentRequests?.[0];
+	backdrop.classList.toggle("hidden", !approval && !request);
+	if (!approval && !request) {
+		dialog.innerHTML = "";
+		backdrop.removeAttribute("data-request-id");
+		backdrop.removeAttribute("data-request-kind");
+		return;
+	}
+	if (approval) {
+		const changed = backdrop.dataset.requestId !== approval.requestId;
+		backdrop.dataset.requestId = approval.requestId;
+		backdrop.dataset.requestKind = "approval";
+		dialog.innerHTML = `<h2 id="consent-title">${t("approval.title")}</h2><p id="consent-description">${t("approval.description")}</p><dl class="consent-summary"><dt>${escapeHtml(approval.operation)}</dt><dd>${escapeHtml(approval.title)}</dd><dt>${t("consent.arguments")}</dt><dd>${escapeHtml(approval.summary)}</dd><dt>${t("approval.risks")}</dt><dd>${approval.risks.map((risk) => escapeHtml(risk)).join("<br>") || "-"}</dd></dl><div class="consent-actions"><button class="text-button" data-action="approval-respond" data-approved="false">${t("approval.reject")}</button><button class="text-button primary" data-action="approval-respond" data-approved="true" data-autofocus>${t("approval.approve")}</button></div>`;
+		if (changed) queueMicrotask(() => dialog.querySelector("[data-autofocus]")?.focus());
+		return;
+	}
+	const changed = backdrop.dataset.requestId !== request.requestId;
+	backdrop.dataset.requestId = request.requestId;
+	backdrop.dataset.requestKind = "consent";
+	dialog.innerHTML = `<h2 id="consent-title">${t("consent.title")}</h2><p id="consent-description">${t("consent.description")}</p><dl class="consent-summary"><dt>${t("consent.server")}</dt><dd>${escapeHtml(request.serverId)}</dd><dt>${t("consent.tool")}</dt><dd>${escapeHtml(request.toolName)}</dd><dt>${t("consent.arguments")}</dt><dd>${escapeHtml(request.argumentsSummary || "-")}</dd></dl><div class="consent-actions"><button class="text-button" data-action="consent-respond" data-approved="false" data-scope="once">${t("consent.deny")}</button><button class="text-button" data-action="consent-respond" data-approved="true" data-scope="once">${t("consent.once")}</button><button class="text-button" data-action="consent-respond" data-approved="true" data-scope="session">${t("consent.session")}</button><button class="text-button primary" data-action="consent-respond" data-approved="true" data-scope="project" data-autofocus>${t("consent.project")}</button></div>`;
+	if (changed) queueMicrotask(() => dialog.querySelector("[data-autofocus]")?.focus());
 }
 
 function renderDiagnosticsSettings(content) {
@@ -730,6 +822,7 @@ function render() {
 	byId("chat-view").classList.toggle("hidden", settingsOpen);
 	byId("settings-view").classList.toggle("hidden", !settingsOpen);
 	if (settingsOpen) renderSettings();
+	renderConsentModal();
 }
 
 async function refreshProjectSessions() {
@@ -783,7 +876,7 @@ function scheduleRender(messageId) {
 
 function eventBelongsToActiveRuntime(event) {
 	const runtime = desktopState?.runtime;
-	if (event.type?.startsWith("mcp.")) return true;
+	if (event.type?.startsWith("mcp.") || event.type?.startsWith("skills.") || event.type?.startsWith("approval.") || event.type === "runtime.toolsChanged") return true;
 	return !runtime || (event.runtimeId === runtime.runtimeId && event.sessionId === runtime.sessionId);
 }
 
@@ -792,16 +885,46 @@ function applyDesktopEvent(event) {
 	if (event.type === "mcp.consentRequired") {
 		const request = event.request;
 		if (request) {
-			const approved = window.confirm(`Allow MCP tool ${request.serverId}.${request.toolName} for this project?`);
-			void run({ type: "mcp.consent.respond", requestId: request.requestId, approved, scope: "once" });
+			desktopState.consentRequests = [
+				...(desktopState.consentRequests ?? []).filter((candidate) => candidate.requestId !== request.requestId),
+				request,
+			];
+			renderConsentModal();
 		}
 		return true;
 	}
 	if (event.type === "mcp.consentResolved") {
 		if (desktopState.consentRequests) desktopState.consentRequests = desktopState.consentRequests.filter((request) => request.requestId !== event.requestId);
+		renderConsentModal();
 		return true;
 	}
-	if (event.type === "mcp.serverChanged" || event.type === "mcp.toolsChanged") {
+	if (event.type === "mcp.serverChanged" || event.type === "mcp.connectionChanged" || event.type === "mcp.toolsChanged" || event.type === "mcp.agentAvailabilityChanged") {
+		scheduleRefresh(false);
+		return true;
+	}
+	if (event.type === "approval.required") {
+		const request = event.request;
+		if (request) {
+			desktopState.approvalRequests = [
+				...(desktopState.approvalRequests ?? []).filter((candidate) => candidate.requestId !== request.requestId),
+				request,
+			];
+			renderConsentModal();
+		}
+		return true;
+	}
+	if (event.type === "approval.resolved") {
+		desktopState.approvalRequests = (desktopState.approvalRequests ?? []).filter((request) => request.requestId !== event.requestId);
+		renderConsentModal();
+		return true;
+	}
+	if (event.type === "skills.catalogChanged") {
+		desktopState.skillInstallations = event.installations ?? [];
+		scheduleRefresh(false);
+		return true;
+	}
+	if (event.type === "runtime.toolsChanged") {
+		desktopState.runtimeTools = event.snapshot;
 		scheduleRefresh(false);
 		return true;
 	}
@@ -934,7 +1057,9 @@ function startEventStream() {
 
 function selectSlashCommand(commandName) {
 	const input = byId("prompt-input");
-	input.value = `/${commandName} `;
+	const result = replaceCommandToken(input.value, input.selectionStart ?? input.value.length, commandName);
+	input.value = result.text;
+	input.setSelectionRange(result.caret, result.caret);
 	slashItems = [];
 	renderSlashMenu();
 	input.focus();
@@ -1007,6 +1132,14 @@ document.addEventListener("click", async (event) => {
 	} else if (action === "set-trust") await run({ type: "projects.setTrust", projectId: actionTarget.dataset.projectId, trustState: actionTarget.dataset.trust });
 	else if (action === "open-settings") { settingsOpen = true; render(); }
 	else if (action === "change-theme") await run({ type: "settings.update", patch: { theme: actionTarget.dataset.theme } }, t("toast.themeSaved"));
+	else if (action === "consent-respond") {
+		const requestId = byId("consent-modal").dataset.requestId;
+		if (requestId) await run({ type: "mcp.consent.respond", requestId, approved: actionTarget.dataset.approved === "true", scope: actionTarget.dataset.scope });
+	}
+	else if (action === "approval-respond") {
+		const requestId = byId("consent-modal").dataset.requestId;
+		if (requestId) await run({ type: "approval.respond", requestId, approved: actionTarget.dataset.approved === "true" });
+	}
 	else if (action === "close-settings") { settingsOpen = false; editingModelId = null; render(); }
 	else if (action === "abort") await run({ type: "agent.abort" });
 	else if (action === "retry-last") await run({ type: "agent.retryLast" });
@@ -1023,6 +1156,8 @@ document.addEventListener("click", async (event) => {
 		if (result) showToast(`${result.message} / ${result.latencyMs} ms`, result.ok ? "info" : "error");
 	} else if (action === "default-model") await run({ type: "models.setDefault", profileId: actionTarget.dataset.profileId }, t("toast.defaultModel"));
 	else if (action === "remove-skill-directory") await run({ type: "settings.update", patch: { skillDirectories: desktopState.settings.skillDirectories.filter((directory) => directory !== actionTarget.dataset.directory) } }, t("toast.skillRemoved"));
+	else if (action === "update-skill") await run({ type: "skills.update", installationId: actionTarget.dataset.installationId }, t("toast.skillUpdated"));
+	else if (action === "remove-skill") await run({ type: "skills.remove", installationId: actionTarget.dataset.installationId }, t("toast.skillRemoved"));
 	else if (action === "reload-skills") await run({ type: "skills.reload" }, t("toast.skillsRescanned"));
 	else if (action === "toggle-mcp") {
 		const server = (desktopState.mcpServers ?? []).find((candidate) => candidate.profile.id === actionTarget.dataset.serverId);
@@ -1030,9 +1165,12 @@ document.addEventListener("click", async (event) => {
 	} else if (action === "test-mcp") {
 		const result = await run({ type: "mcp.testConnection", serverId: actionTarget.dataset.serverId });
 		if (result) showToast(result.status === "ready" ? t("toast.mcpConnected") : (result.lastError ?? t("toast.mcpFailed")), result.status === "ready" ? "info" : "error");
+	} else if (action === "retry-mcp") {
+		await run({ type: "mcp.retry", serverId: actionTarget.dataset.serverId }, t("toast.mcpUpdated"));
 	} else if (action === "delete-mcp") {
 		if (window.confirm(t("confirm.deleteMcp"))) await run({ type: "mcp.delete", serverId: actionTarget.dataset.serverId }, t("toast.mcpDeleted"));
 	}
+	else if (action === "revoke-mcp-consent") await run({ type: "mcp.consent.revoke", projectId: desktopState.activeProjectId }, t("toast.mcpPermissionsRevoked"));
 	else if (action === "reset-shortcut") await run({ type: "settings.reset", key: "invokeShortcut" }, t("toast.saved"));
 	else if (action === "export-diagnostics") {
 		const path = await run({ type: "app.exportDiagnostics" });
@@ -1113,11 +1251,23 @@ document.addEventListener("submit", async (event) => {
 		event.preventDefault();
 		const directory = new FormData(event.target).get("directory");
 		if (directory) await run({ type: "settings.update", patch: { skillDirectories: [...desktopState.settings.skillDirectories, directory] } }, t("toast.skillAdded"));
+	} else if (event.target.id === "skill-install-form") {
+		event.preventDefault();
+		const data = new FormData(event.target);
+		const raw = String(data.get("source") || "").trim();
+		if (!raw) return;
+		const kind = raw.startsWith("npm:") ? "npm" : raw.startsWith("git:") ? "git" : /^https?:\/\//i.test(raw) ? "url" : "external";
+		await run({ type: "skills.install", source: { kind, spec: raw }, scope: data.get("scope") }, t("toast.skillAdded"));
 	} else if (event.target.id === "mcp-form") {
 		event.preventDefault();
 		const data = new FormData(event.target);
 		const transport = data.get("transport");
-		await run({ type: "mcp.create", profile: { name: data.get("name"), namespace: data.get("namespace"), transport, command: data.get("command") || null, args: String(data.get("args") || "").split("\n").map((value) => value.trim()).filter(Boolean), env: {}, url: data.get("url") || null, credentialRef: null, enabled: data.get("enabled") === "on", timeoutMs: 30000, maxOutputBytes: 1048576, projectId: null } }, t("toast.mcpUpdated"));
+		const scope = data.get("scope") === "global" ? "global" : "project";
+		await run({ type: "mcp.create", profile: { name: data.get("name"), namespace: data.get("namespace"), transport, command: data.get("command") || null, args: String(data.get("args") || "").split("\n").map((value) => value.trim()).filter(Boolean), env: {}, url: data.get("url") || null, credentialRef: null, enabled: data.get("enabled") === "on", timeoutMs: 30000, maxOutputBytes: 1048576, projectId: scope === "project" ? desktopState.activeProjectId : null, scope } }, t("toast.mcpUpdated"));
+	} else if (event.target.id === "mcp-import-form") {
+		event.preventDefault();
+		const data = new FormData(event.target);
+		await run({ type: "mcp.import", json: data.get("json"), scope: data.get("scope") }, t("toast.mcpUpdated"));
 	}
 });
 
@@ -1133,12 +1283,28 @@ byId("model-select").addEventListener("change", async (event) => {
 });
 byId("thinking-select").addEventListener("change", async (event) => run({ type: "agent.setThinkingLevel", level: event.target.value }));
 byId("prompt-input").addEventListener("input", renderSlashMenu);
+byId("prompt-input").addEventListener("compositionstart", () => { slashComposition = true; renderSlashMenu(); });
+byId("prompt-input").addEventListener("compositionend", () => { slashComposition = false; renderSlashMenu(); });
+byId("slash-menu").addEventListener("pointermove", (event) => {
+	const option = event.target.closest("[data-slash-index]");
+	if (!option) return;
+	const nextIndex = Number(option.dataset.slashIndex);
+	if (nextIndex === slashIndex) return;
+	slashIndex = nextIndex;
+	syncSlashSelection();
+});
+byId("slash-menu").addEventListener("pointerdown", (event) => {
+	const option = event.target.closest("[data-command]");
+	if (!option) return;
+	event.preventDefault();
+	selectSlashCommand(option.dataset.command);
+});
 byId("prompt-input").addEventListener("keydown", (event) => {
-	if (slashItems.length > 0) {
-		if (event.key === "ArrowDown") { event.preventDefault(); slashIndex = (slashIndex + 1) % slashItems.length; renderSlashMenu(); return; }
-		if (event.key === "ArrowUp") { event.preventDefault(); slashIndex = (slashIndex - 1 + slashItems.length) % slashItems.length; renderSlashMenu(); return; }
+	if (slashItems.length > 0 && !event.isComposing && !slashComposition) {
+		if (event.key === "ArrowDown") { event.preventDefault(); slashIndex = cycleSelection(slashItems.length, slashIndex, 1); renderSlashMenu(); return; }
+		if (event.key === "ArrowUp") { event.preventDefault(); slashIndex = cycleSelection(slashItems.length, slashIndex, -1); renderSlashMenu(); return; }
 		if (event.key === "Escape") { event.preventDefault(); slashItems = []; byId("slash-menu").classList.add("hidden"); return; }
-		if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); selectSlashCommand(slashItems[slashIndex].name); return; }
+		if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") { event.preventDefault(); selectSlashCommand(slashItems[slashIndex].name); return; }
 	}
 	if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); byId("prompt-form").requestSubmit(); }
 });

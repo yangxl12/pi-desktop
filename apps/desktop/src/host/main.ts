@@ -9,8 +9,8 @@ import {
 	RuntimeProviderRegistry,
 	RuntimeService,
 } from "@earendil-works/pi-desktop-core";
-import { ConsentBroker, McpManager } from "@earendil-works/pi-desktop-mcp";
-import { createPiRuntimeProvider } from "@earendil-works/pi-desktop-pi-bridge";
+import { ConsentBroker, FileToolPolicyStore, McpManager, McpPackageInstaller } from "@earendil-works/pi-desktop-mcp";
+import { createPiRuntimeProvider, PiSkillPackageAdapter } from "@earendil-works/pi-desktop-pi-bridge";
 import {
 	backupBeforeMigration,
 	desktopDataDirectory,
@@ -26,6 +26,7 @@ import { createDesktopHostHttpServer } from "./http-gateway.ts";
 import { ConsoleDesktopLogger } from "./logger.ts";
 import { FetchModelConnectionTester, NativeFolderPickerPort, PlatformSecretStore } from "./platform-services.ts";
 import { MemoryShortcutPort, MemoryTrayPort, MemoryWindowPort } from "./ports.ts";
+import { rendererContentType } from "./static-content.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rendererDirectory = process.env.PI_DESKTOP_RENDERER_DIR ?? join(here, "..", "renderer");
@@ -65,12 +66,7 @@ async function serveRenderer(pathname: string, response: ServerResponse): Promis
 	}
 	try {
 		const content = await readFile(filePath);
-		const contentType = filePath.endsWith(".css")
-			? "text/css; charset=utf-8"
-			: filePath.endsWith(".js")
-				? "text/javascript; charset=utf-8"
-				: "text/html; charset=utf-8";
-		response.writeHead(200, { "content-type": contentType, "cache-control": "no-store" });
+		response.writeHead(200, { "content-type": rendererContentType(filePath), "cache-control": "no-store" });
 		response.end(content);
 	} catch {
 		sendJson(response, 404, { error: "Not found" });
@@ -97,21 +93,43 @@ async function main(): Promise<void> {
 		platform === "win32" || platform === "darwin"
 			? new PlatformSecretStore(dataDirectory, process.platform)
 			: new MemorySecretStore();
-	const consent = new ConsentBroker({ timeoutMs: 30_000 });
+	const consent = new ConsentBroker({
+		timeoutMs: 30_000,
+		store: new FileToolPolicyStore(join(dataDirectory, "mcp", "consent-policy.json")),
+	});
+	const sidecarPath = process.env.PI_DESKTOP_SIDECAR_NODE ?? process.execPath;
+	const npmCliPath = process.env.PI_DESKTOP_NPM_CLI ?? process.env.npm_execpath;
 	const mcp = new McpManager({
 		secrets,
 		consent: (request) => consent.request(request),
 		respondConsent: (requestId, approved, scope) => consent.respond(requestId, approved, scope),
 		consentBroker: consent,
+		packageInstaller: npmCliPath
+			? new McpPackageInstaller({ sidecarPath, npmCliPath, installRoot: join(dataDirectory, "mcp", "packages") })
+			: undefined,
 	});
 	const runtimeRegistry = new RuntimeProviderRegistry();
 	runtimeRegistry.register(
 		createPiRuntimeProvider({
-			rpc: process.env.PI_DESKTOP_RPC_ENTRY ? { args: [process.env.PI_DESKTOP_RPC_ENTRY] } : undefined,
+			rpc:
+				process.env.PI_DESKTOP_RPC_ENTRY || process.env.PI_DESKTOP_TOOL_BRIDGE_EXTENSION
+					? {
+							...(process.env.PI_DESKTOP_RPC_ENTRY ? { args: [process.env.PI_DESKTOP_RPC_ENTRY] } : {}),
+							...(process.env.PI_DESKTOP_TOOL_BRIDGE_EXTENSION
+								? { toolBridgeExtensionPath: process.env.PI_DESKTOP_TOOL_BRIDGE_EXTENSION }
+								: {}),
+						}
+					: undefined,
 		}),
 		{ isDefault: true },
 	);
 	const runtimeService = new RuntimeService(runtimeRegistry);
+	const skillPackage = new PiSkillPackageAdapter({
+		cwd: process.cwd(),
+		agentDir: join(dataDirectory, "agent"),
+		projectTrusted: true,
+		npmCommand: npmCliPath ? [sidecarPath, npmCliPath] : undefined,
+	});
 	const app = new DesktopApplication({
 		platform,
 		ports: {
@@ -130,6 +148,7 @@ async function main(): Promise<void> {
 		sessionFiles: new PiSessionFileRepository(),
 		modelConnection: new FetchModelConnectionTester(),
 		mcp,
+		skillPackage,
 		agentDirectory: join(dataDirectory, "agent"),
 		sessionDirectory: (project) => projectSessionDirectory(dataDirectory, project.id),
 		logger: new ConsoleDesktopLogger(),
