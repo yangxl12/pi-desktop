@@ -5,6 +5,7 @@ import type { DesktopMessage, ThinkingLevel } from "@earendil-works/pi-desktop-p
 import {
 	type AgentEvent,
 	type AgentRuntimePort,
+	clampThinkingLevel,
 	DEFAULT_RUNTIME_CAPABILITIES,
 	type RuntimeCommand,
 	type RuntimeStartOptions,
@@ -14,6 +15,8 @@ import {
 export interface FakeRuntimeOptions {
 	response?: string;
 	streamDelayMs?: number;
+	/** When set, thinking levels are clamped to this list, mirroring Pi's model capability clamping. */
+	availableThinkingLevels?: ThinkingLevel[];
 }
 
 /** Small deterministic provider used by core contract tests and local previews. */
@@ -57,10 +60,15 @@ export class FakeAgentRuntime implements AgentRuntimePort {
 			sessionRef,
 			sessionPath: sessionRef,
 			sessionId: randomUUID(),
-			thinkingLevel: options.thinkingLevel,
+			thinkingLevel: this.options.availableThinkingLevels
+				? clampThinkingLevel(this.options.availableThinkingLevels, options.thinkingLevel)
+				: options.thinkingLevel,
 			modelProvider: options.selectedModel?.providerId ?? null,
 			modelId: options.selectedModel?.modelId ?? null,
 			messageCount: this.messages.length,
+			...(this.options.availableThinkingLevels
+				? { availableThinkingLevels: [...this.options.availableThinkingLevels] }
+				: {}),
 		};
 		this.emit({ type: "ready", runtimeId: this.runtimeId, state: { ...this.state } });
 		return { ...this.state };
@@ -151,7 +159,9 @@ export class FakeAgentRuntime implements AgentRuntimePort {
 	}
 
 	setThinkingLevel(level: ThinkingLevel): Promise<void> {
-		this.state.thinkingLevel = level;
+		this.state.thinkingLevel = this.options.availableThinkingLevels
+			? clampThinkingLevel(this.options.availableThinkingLevels, level)
+			: level;
 		return Promise.resolve();
 	}
 

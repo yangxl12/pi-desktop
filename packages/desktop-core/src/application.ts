@@ -192,6 +192,7 @@ function asRuntimeSnapshot(
 		status: state.status,
 		isStreaming: state.isStreaming ?? false,
 		thinkingLevel: state.thinkingLevel ?? "high",
+		availableThinkingLevels: state.availableThinkingLevels ?? [...THINKING_LEVELS],
 		modelProvider: state.modelProvider ?? null,
 		modelId: state.modelId ?? null,
 		sessionPath: state.sessionPath ?? null,
@@ -1310,8 +1311,13 @@ export class DesktopApplication {
 
 	private async setThinkingLevel(level: ThinkingLevel): Promise<null> {
 		await this.requireRuntime().setThinkingLevel(level);
-		if (this.runtime) this.runtime.thinkingLevel = level;
-		await this.updateActiveConversation({ thinkingLevel: level });
+		const state = await this.requireRuntime().getState();
+		const effective = state.thinkingLevel ?? level;
+		if (this.runtime) {
+			this.runtime.thinkingLevel = effective;
+			if (state.availableThinkingLevels) this.runtime.availableThinkingLevels = state.availableThinkingLevels;
+		}
+		await this.updateActiveConversation({ thinkingLevel: effective });
 		return null;
 	}
 
@@ -1828,11 +1834,57 @@ export class DesktopApplication {
 		return { ...profile, env: {}, secretEnvRefs, secretHeaderRefs };
 	}
 
+	/**
+	 * Pi only serves the in-memory agent context via get_messages. Long sessions
+	 * are compacted (the transcript collapses into a summary), so after a session
+	 * reload the runtime alone would hide almost the entire conversation.
+	 * The session JSONL is the durable transcript, so merge it back in: the full
+	 * file history is shown in order, with runtime copies winning where they
+	 * match (live status/durations), and any live-only tail appended last.
+	 */
+	private async mergeSessionTranscript(runtimeMessages: DesktopMessage[]): Promise<DesktopMessage[]> {
+		const sessionFiles = this.options.sessionFiles;
+		const session = this.activeConversation();
+		if (!sessionFiles?.readMessages || !session?.sessionPath) return runtimeMessages;
+		let fileMessages: DesktopMessage[];
+		try {
+			fileMessages = collapseMessages(await sessionFiles.readMessages(session.sessionPath));
+		} catch (_error: unknown) {
+			this.recordDiagnostic("warning", "session-index", `Session transcript read failed: ${session.sessionPath}`);
+			return runtimeMessages;
+		}
+		if (fileMessages.length === 0) return runtimeMessages;
+		const runtimeByIdentity = new Map<string, DesktopMessage>();
+		for (const message of runtimeMessages) {
+			const key = messageFingerprint(message);
+			if (!runtimeByIdentity.has(key)) runtimeByIdentity.set(key, message);
+		}
+		const merged: DesktopMessage[] = [];
+		for (const message of fileMessages) {
+			const live = runtimeByIdentity.get(messageFingerprint(message));
+			if (live) {
+				runtimeByIdentity.delete(messageFingerprint(message));
+				merged.push(cloneMessage(live));
+			} else merged.push(cloneMessage(message));
+		}
+		for (const message of runtimeMessages) {
+			const key = messageFingerprint(message);
+			if (!runtimeByIdentity.has(key)) continue;
+			runtimeByIdentity.delete(key);
+			// Pi compaction summaries normalize to empty tool parts; they are not
+			// part of the visible transcript, so do not surface them as a message.
+			if (message.role === "tool" && !hasVisibleMessageContent(message)) continue;
+			merged.push(cloneMessage(message));
+		}
+		return merged;
+	}
+
 	private async refreshRuntimeMessages(): Promise<void> {
 		const startedAt = performance.now();
 		const previousMessages = collapseMessages([...this.messages.values()]);
 		const previous = new Map(previousMessages.map((message) => [message.id, message]));
-		const messages = collapseMessages(await this.requireRuntime().getMessages());
+		const runtimeMessages = collapseMessages(await this.requireRuntime().getMessages());
+		const messages = await this.mergeSessionTranscript(runtimeMessages);
 		this.messages.clear();
 		const consumedPreviousIds = new Set<string>();
 		for (const message of messages) {

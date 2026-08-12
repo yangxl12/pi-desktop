@@ -319,6 +319,8 @@ export interface RuntimeSnapshot extends RuntimeIdentity {
 	status: "starting" | "ready" | "streaming" | "stopped" | "error";
 	isStreaming: boolean;
 	thinkingLevel: ThinkingLevel;
+	/** Thinking levels the active model accepts. Absent/empty when the runtime is not started. */
+	availableThinkingLevels?: ThinkingLevel[];
 	modelProvider: string | null;
 	modelId: string | null;
 	sessionPath: string | null;

@@ -41,6 +41,18 @@ function sendJson(response: ServerResponse, statusCode: number, value: unknown):
 	response.end(JSON.stringify(value));
 }
 
+function notifyHostFatal(reason: string): void {
+	const token = process.env.PI_DESKTOP_HOST_TOKEN;
+	if (!token || typeof process.send !== "function") return;
+	try {
+		// Close the IPC channel after the message is flushed so the process
+		// can exit; an open channel keeps the event loop alive forever.
+		process.send({ type: "pi-desktop.host.fatal", token, reason }, () => process.disconnect());
+	} catch {
+		process.disconnect();
+	}
+}
+
 async function serveRenderer(pathname: string, response: ServerResponse): Promise<void> {
 	if (pathname.startsWith("/vendor/lucide/")) {
 		const requested = pathname.slice("/vendor/lucide/".length);
@@ -83,6 +95,7 @@ async function main(): Promise<void> {
 	await electronPorts?.refresh();
 	const singleInstance = new FileSingleInstancePort(dataDirectory);
 	if (!(await singleInstance.acquire(() => window.show()))) {
+		notifyHostFatal("Pi Desktop is already running");
 		console.error("Pi desktop is already running");
 		return;
 	}
@@ -162,6 +175,11 @@ async function main(): Promise<void> {
 		port,
 		staticHandler: (pathname, response) => serveRenderer(pathname, response),
 	});
+	http.server.once("error", (error: unknown) => {
+		notifyHostFatal(`Cannot listen on port ${port}: ${error instanceof Error ? error.message : String(error)}`);
+		console.error(error);
+		process.exitCode = 1;
+	});
 	http.server.listen(port, "127.0.0.1", () => console.log(`Pi desktop host listening at http://127.0.0.1:${port}`));
 	let shuttingDown = false;
 	const shutdown = async (): Promise<void> => {
@@ -176,6 +194,7 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error: unknown) => {
+	notifyHostFatal(`Background service failed to start: ${error instanceof Error ? error.message : String(error)}`);
 	console.error(error);
 	process.exitCode = 1;
 });

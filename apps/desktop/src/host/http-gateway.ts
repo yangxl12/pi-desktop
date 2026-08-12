@@ -7,6 +7,7 @@ import {
 	type DesktopResponse,
 	parseDesktopRequest,
 } from "@earendil-works/pi-desktop-protocol";
+import { projectsFromState, serveProjectFile } from "./file-preview.ts";
 
 export interface HostHttpLimits {
 	maxBodyBytes: number;
@@ -387,6 +388,16 @@ export function createDesktopHostHttpServer(options: DesktopHostHttpServerOption
 			}
 			if (request.method === "GET" && pathname === "/api/events") {
 				events.connect(response, request.headers["last-event-id"] as string | undefined, options.app.getState());
+				return;
+			}
+			if (request.method === "GET" && pathname === "/api/file") {
+				const url = new URL(request.url ?? "/", "http://127.0.0.1");
+				await serveProjectFile(
+					projectsFromState(options.app.getState()),
+					url.searchParams.get("projectId") ?? "",
+					url.searchParams.get("path") ?? "",
+					response,
+				);
 				return;
 			}
 			if (request.method === "POST" && pathname === "/api/command") {

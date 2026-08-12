@@ -8,7 +8,7 @@ import type {
 	PiCommandInfo,
 	PiRuntimeOptions,
 } from "@earendil-works/pi-desktop-core";
-import { DEFAULT_RUNTIME_CAPABILITIES } from "@earendil-works/pi-desktop-core";
+import { clampThinkingLevel, DEFAULT_RUNTIME_CAPABILITIES } from "@earendil-works/pi-desktop-core";
 import type { DesktopMessage, ThinkingLevel } from "@earendil-works/pi-desktop-protocol";
 
 function assistantMessage(text = ""): DesktopMessage {
@@ -24,6 +24,8 @@ function assistantMessage(text = ""): DesktopMessage {
 export interface FakePiAgentPortOptions {
 	response?: string;
 	streamDelayMs?: number;
+	/** When set, thinking levels are clamped to this list, mirroring Pi's model capability clamping. */
+	availableThinkingLevels?: ThinkingLevel[];
 }
 
 export class FakePiAgentPort implements PiAgentPort {
@@ -66,10 +68,15 @@ export class FakePiAgentPort implements PiAgentPort {
 			sessionPath,
 			sessionRef: sessionPath,
 			sessionId: randomUUID(),
-			thinkingLevel: options.thinkingLevel,
+			thinkingLevel: this.options.availableThinkingLevels
+				? clampThinkingLevel(this.options.availableThinkingLevels, options.thinkingLevel)
+				: options.thinkingLevel,
 			modelProvider: options.selectedModel?.providerId ?? null,
 			modelId: options.selectedModel?.modelId ?? null,
 			messageCount: this.messages.length,
+			...(this.options.availableThinkingLevels
+				? { availableThinkingLevels: [...this.options.availableThinkingLevels] }
+				: {}),
 		};
 		this.emit({ type: "ready", runtimeId: this.runtimeId, state: { ...this.state } });
 		return { ...this.state };
@@ -193,7 +200,9 @@ export class FakePiAgentPort implements PiAgentPort {
 	async setSessionName(_name: string): Promise<void> {}
 
 	async setThinkingLevel(level: ThinkingLevel): Promise<void> {
-		this.state.thinkingLevel = level;
+		this.state.thinkingLevel = this.options.availableThinkingLevels
+			? clampThinkingLevel(this.options.availableThinkingLevels, level)
+			: level;
 	}
 
 	async setModel(provider: string, modelId: string): Promise<void> {

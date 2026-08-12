@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AddressInfo } from "node:net";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createDesktopHostHttpServer } from "../src/host/http-gateway.ts";
 
 function appStub() {
@@ -71,6 +74,58 @@ describe("desktop host HTTP gateway", () => {
 			body: JSON.stringify({ requestId: "too-large", command: { type: "app.getState" } }),
 		});
 		expect(oversized.status).toBe(413);
+		await gateway.close();
+	});
+
+	it("serves project files through /api/file with traversal and size guards", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-preview-"));
+		writeFileSync(join(directory, "notes.md"), "# 笔记\n\n预览内容");
+		writeFileSync(join(directory, "page.html"), "<h1>Hello</h1>");
+		writeFileSync(join(directory, "secret.txt"), "top secret");
+		mkdirSync(join(directory, "nested"));
+		writeFileSync(join(directory, "nested", "image.svg"), "<svg/>");
+		const app = appStub();
+		app.state = {
+			ready: true,
+			projects: [{ id: "p1", rootPath: directory, trustState: "trusted" }],
+		};
+		const gateway = createDesktopHostHttpServer({ app, hostToken: "test-token", port: 4317 });
+		gateway.server.listen(0, "127.0.0.1");
+		await new Promise<void>((resolve) => gateway.server.once("listening", () => resolve()));
+		const port = (gateway.server.address() as AddressInfo).port;
+		const base = { "x-pi-desktop-token": "test-token" };
+		const fetchFile = (params: string) =>
+			fetch(`http://127.0.0.1:${port}/api/file?${params}`, { headers: base });
+
+		const missing = await fetchFile("projectId=p1&path=nope.md");
+		expect(missing.status).toBe(404);
+
+		const unknownProject = await fetchFile("projectId=nope&path=notes.md");
+		expect(unknownProject.status).toBe(404);
+
+		const missingParams = await fetchFile("projectId=p1");
+		expect(missingParams.status).toBe(400);
+
+		const traversal = await fetchFile("projectId=p1&path=..%2F..%2F..%2Fwindows%2Fwin.ini");
+		expect(traversal.status).toBe(403);
+
+		const absolute = await fetchFile(`projectId=p1&path=${encodeURIComponent(join(directory, "secret.txt"))}`);
+		expect(absolute.status).toBe(400);
+
+		const markdown = await fetchFile("projectId=p1&path=notes.md");
+		expect(markdown.status).toBe(200);
+		expect(markdown.headers.get("content-type")).toContain("text/markdown");
+		expect(markdown.headers.get("x-content-type-options")).toBe("nosniff");
+		expect(await markdown.text()).toContain("# 笔记");
+
+		const html = await fetchFile("projectId=p1&path=page.html");
+		expect(html.status).toBe(200);
+		expect(html.headers.get("content-type")).toContain("text/html");
+
+		const nested = await fetchFile("projectId=p1&path=nested%2Fimage.svg");
+		expect(nested.status).toBe(200);
+		expect(nested.headers.get("content-type")).toContain("image/svg+xml");
+
 		await gateway.close();
 	});
 });

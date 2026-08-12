@@ -81,6 +81,8 @@ export interface RuntimeToolDefinition {
 export interface RuntimeState {
 	isStreaming: boolean;
 	thinkingLevel: ThinkingLevel;
+	/** Thinking levels the active model accepts. Absent when the provider cannot report them. */
+	availableThinkingLevels?: ThinkingLevel[];
 	modelProvider: string | null;
 	modelId: string | null;
 	/** Runtime-neutral session handle. Pi maps this to sessionPath. */
@@ -153,4 +155,30 @@ export function normalizeRuntimeCapabilities(
 	capabilities: Partial<RuntimeCapabilities> | undefined,
 ): RuntimeCapabilities {
 	return { ...DEFAULT_RUNTIME_CAPABILITIES, ...capabilities };
+}
+
+export const EXTENDED_THINKING_LEVELS: readonly ThinkingLevel[] = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+];
+
+/** Mirror of Pi's clamp: keep the level, otherwise try upward then downward in the extended list. */
+export function clampThinkingLevel(available: readonly ThinkingLevel[], level: ThinkingLevel): ThinkingLevel {
+	if (available.includes(level)) return level;
+	const requestedIndex = EXTENDED_THINKING_LEVELS.indexOf(level);
+	if (requestedIndex === -1) return available[0] ?? "off";
+	for (let index = requestedIndex; index < EXTENDED_THINKING_LEVELS.length; index++) {
+		const candidate = EXTENDED_THINKING_LEVELS[index];
+		if (available.includes(candidate)) return candidate;
+	}
+	for (let index = requestedIndex - 1; index >= 0; index--) {
+		const candidate = EXTENDED_THINKING_LEVELS[index];
+		if (available.includes(candidate)) return candidate;
+	}
+	return available[0] ?? "off";
 }

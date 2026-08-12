@@ -7,6 +7,7 @@ import {
 	type ElectronShellEvent,
 	type ElectronShellRequest,
 	type ElectronShellResponse,
+	isElectronHostFatalMessage,
 	isElectronShellRequest,
 } from "../shared/electron-shell-ipc.ts";
 
@@ -19,6 +20,9 @@ let registeredShortcut: string | undefined;
 let closeToTray = true;
 let quitting = false;
 let shortcutReturnTarget: "tray" | "minimized" | null = null;
+let hostFailure: string | undefined;
+let hostStartFailures = 0;
+let forceQuitTimer: NodeJS.Timeout | undefined;
 
 function resourcePath(...parts: string[]): string {
 	return join(process.env.PI_DESKTOP_RESOURCES_DIR ?? process.resourcesPath, ...parts);
@@ -105,11 +109,16 @@ function toggleWindow(): void {
 
 async function waitForHost(): Promise<void> {
 	for (let attempt = 0; attempt < 60; attempt += 1) {
+		if (!host) throw new Error("Pi Desktop background service did not start");
 		try {
 			const response = await fetch(`http://127.0.0.1:${port}/api/state`, {
 				headers: { "x-pi-desktop-token": hostToken },
 			});
-			if (response.ok) return;
+			if (response.ok) {
+				hostFailure = undefined;
+				hostStartFailures = 0;
+				return;
+			}
 		} catch {}
 		await new Promise<void>((resolve) => setTimeout(resolve, 250));
 	}
@@ -152,9 +161,25 @@ function startHost(): void {
 		stdio: ["ignore", "ignore", "ignore", "ipc"],
 	});
 	host.on("message", (message: unknown) => void handleHostMessage(message));
-	host.once("exit", () => {
+	host.once("exit", (_code, _signal) => {
 		host = null;
-		if (!quitting) void showWindow();
+		if (quitting) return;
+		// The host's fatal message can arrive a tick after the exit event;
+		// give it a moment before deciding whether to retry.
+		setTimeout(() => {
+			if (quitting) return;
+			if (hostFailure) {
+				void showFailurePage();
+				return;
+			}
+			hostStartFailures += 1;
+			if (hostStartFailures < 3) {
+				setTimeout(() => void showWindow(), 500 * hostStartFailures);
+				return;
+			}
+			hostStartFailures = 0;
+			void showFailurePage(new Error("Pi Desktop background service did not start"));
+		}, 400);
 	});
 }
 
@@ -166,16 +191,36 @@ async function showWindow(): Promise<void> {
 		const hostUrl = `http://127.0.0.1:${port}/#hostToken=${encodeURIComponent(hostToken)}`;
 		if (window.webContents.getURL() !== hostUrl) await window.loadURL(hostUrl);
 	} catch (error: unknown) {
-		await window.loadURL(
-			`data:text/html;charset=utf-8,${encodeURIComponent(`<h1>Pi Desktop failed to start</h1><pre>${error instanceof Error ? error.message : String(error)}</pre>`)}`,
-		);
+		// If the host process is gone, the exit handler owns the outcome
+		// (fatal reason page or retry); don't overwrite it.
+		if (host) await showFailurePage(error);
 	}
+	revealWindow();
+}
+
+async function showFailurePage(error?: unknown): Promise<void> {
+	if (!window) return;
+	const detail = [hostFailure, error instanceof Error ? error.message : error ? String(error) : undefined]
+		.filter((part): part is string => typeof part === "string" && part.length > 0)
+		.join("\n\n");
+	await window.loadURL(
+		`data:text/html;charset=utf-8,${encodeURIComponent(`<h1>Pi Desktop failed to start</h1><pre>${detail}</pre>`)}`,
+	);
 	revealWindow();
 }
 
 function requestQuit(): void {
 	if (host?.connected) {
 		sendToHost({ type: "pi-desktop.shell.event", token: hostToken, event: "tray.action", action: "quit" });
+		// If the host never processes the quit (broken startup, hung shutdown),
+		// force the app down so Quit always exits.
+		clearTimeout(forceQuitTimer);
+		forceQuitTimer = setTimeout(() => {
+			if (!quitting) {
+				quitting = true;
+				app.quit();
+			}
+		}, 4_000);
 		return;
 	}
 	quitting = true;
@@ -195,6 +240,10 @@ function handleTrayAction(action: "open" | "settings" | "quit"): void {
 }
 
 async function handleHostMessage(value: unknown): Promise<void> {
+	if (isElectronHostFatalMessage(value) && value.token === hostToken) {
+		hostFailure = value.reason;
+		return;
+	}
 	if (!isElectronShellRequest(value) || value.token !== hostToken) return;
 	const respond = (success: boolean, state = currentWindowState(), error?: string): void => {
 		const message: ElectronShellResponse = {
@@ -328,6 +377,7 @@ else {
 	app.on("second-instance", () => void showWindow());
 	app.on("before-quit", () => {
 		quitting = true;
+		clearTimeout(forceQuitTimer);
 	});
 	app.on("will-quit", () => {
 		globalShortcut.unregisterAll();

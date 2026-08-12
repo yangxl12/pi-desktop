@@ -1,9 +1,17 @@
 import { createElement, icons } from "/vendor/lucide/lucide.mjs";
+import { createViewer, imagePlugin, textPlugin } from "/vendor/open-file-viewer/index.js";
 import { commandTokenAtCaret, cycleSelection, filterSlashCommands, replaceCommandToken } from "/slash-menu.mjs";
 
 let desktopState = null;
 let settingsOpen = false;
 let settingsTab = "models";
+let sidebarCollapsed = (() => {
+	try {
+		return localStorage.getItem("pi-sidebar-collapsed") === "1";
+	} catch {
+		return false;
+	}
+})();
 let editingModelId = null;
 let selectedQueue = null;
 let slashItems = [];
@@ -22,6 +30,16 @@ const reasoningOpen = new Map();
 const responseStartedAt = new Map();
 const responseDurations = new Map();
 let contextMenuTarget = null;
+let previewState = null;
+let previewViewer = null;
+
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+const PREVIEWABLE_EXTENSIONS = new Set([
+	"md", "markdown", "html", "htm", "txt", "json", "yaml", "yml", "toml", "csv",
+	"svg", "png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico",
+	"pdf", "docx", "xlsx", "pptx", "zip",
+]);
 
 const translations = {
 	"zh-CN": {
@@ -38,6 +56,8 @@ const translations = {
 		"history.empty": "暂无历史对话",
 		"runtime.none": "未启动运行时",
 		"settings": "设置",
+		"sidebar.collapse": "收起侧边栏",
+		"sidebar.expand": "展开侧边栏",
 		"model": "模型",
 		"thinking": "思考强度",
 		"thinking.off": "关闭",
@@ -127,6 +147,12 @@ const translations = {
 		"settings.status": "状态",
 		"settings.sessionFile": "会话文件",
 		"settings.noDiagnostics": "没有诊断记录",
+		"preview.open": "在侧边栏预览文件",
+		"preview.title": "文件预览",
+		"preview.fullscreen": "全屏预览",
+		"preview.exitFullscreen": "退出全屏",
+		"preview.close": "关闭预览",
+		"preview.failed": "文件不存在或暂时无法读取",
 		"toast.saved": "已保存",
 		"toast.copied": "消息已复制",
 		"toast.modelSaved": "模型已保存",
@@ -191,6 +217,8 @@ const translations = {
 		"history.empty": "No conversation history",
 		"runtime.none": "No runtime",
 		"settings": "Settings",
+		"sidebar.collapse": "Collapse sidebar",
+		"sidebar.expand": "Expand sidebar",
 		"model": "Model",
 		"thinking": "Thinking",
 		"thinking.off": "Off",
@@ -280,6 +308,12 @@ const translations = {
 		"settings.status": "Status",
 		"settings.sessionFile": "Session file",
 		"settings.noDiagnostics": "No diagnostics",
+		"preview.open": "Preview file in the sidebar",
+		"preview.title": "File preview",
+		"preview.fullscreen": "Fullscreen preview",
+		"preview.exitFullscreen": "Exit fullscreen",
+		"preview.close": "Close preview",
+		"preview.failed": "File not found or unreadable",
 		"toast.saved": "Saved",
 		"toast.copied": "Message copied",
 		"toast.modelSaved": "Model saved",
@@ -450,9 +484,21 @@ function renderHeader() {
 		?? enabledModels.find((model) => model.id === desktopState.settings.defaultModelProfileId);
 	modelSelect.value = currentModel?.id ?? "";
 	modelSelect.disabled = !runtime || runtime.isStreaming;
-	byId("thinking-select").value = runtime?.thinkingLevel ?? desktopState.settings.defaultThinkingLevel ?? "high";
-	byId("thinking-select").disabled = !runtime || runtime.isStreaming;
-	for (const option of byId("thinking-select").options) option.textContent = t(`thinking.${option.value}`);
+	const thinkingSelect = byId("thinking-select");
+	const availableThinkingLevels =
+		runtime?.availableThinkingLevels?.length > 0 ? runtime.availableThinkingLevels : THINKING_LEVELS;
+	const currentThinking = runtime?.thinkingLevel ?? desktopState.settings.defaultThinkingLevel ?? "high";
+	const levelCacheKey = `${desktopState.settings.locale}:${availableThinkingLevels.join(",")}`;
+	if (thinkingSelect.dataset.levels !== levelCacheKey) {
+		thinkingSelect.innerHTML = availableThinkingLevels
+			.map((level) => `<option value="${escapeHtml(level)}">${escapeHtml(t(`thinking.${level}`))}</option>`)
+			.join("");
+		thinkingSelect.dataset.levels = levelCacheKey;
+	}
+	thinkingSelect.value = availableThinkingLevels.includes(currentThinking)
+		? currentThinking
+		: availableThinkingLevels.at(-1) ?? "high";
+	thinkingSelect.disabled = !runtime || runtime.isStreaming;
 }
 
 function renderTrustBanner() {
@@ -576,7 +622,177 @@ function renderMarkdown(value) {
 	html = html.replace(/^### (.*)$/gm, "<h3>$1</h3>").replace(/^## (.*)$/gm, "<h2>$1</h2>").replace(/^# (.*)$/gm, "<h1>$1</h1>");
 	html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>");
 	html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+	html = html.replace(/\[([^\]]+)\]\(([^)"']+\.(?:md|markdown|html?|json|ya?ml|toml|txt|csv|svg|png|jpe?g|gif|webp|avif|bmp|ico|pdf|docx|xlsx|pptx|zip))\)/gi, (_match, label, filePath) => `<a href="#" data-action="preview-file" data-file-path="${filePath}" title="${t("preview.open")}">${label}</a>`);
 	return html.replace(/\n/g, "<br>");
+}
+
+const previewPathExtension = (path) => {
+	const match = /\.([A-Za-z0-9]+)$/.exec(path);
+	return match ? match[1].toLowerCase() : "";
+};
+
+const normalizePreviewPath = (value) => {
+	const candidate = String(value ?? "").trim().replace(/^["'`]+|["'`]+$/g, "").replace(/^\.\//, "");
+	if (!candidate || candidate.length > 4096) return null;
+	if (/^(https?:)?\/\//i.test(candidate) || /^[A-Za-z]:[\\/]/.test(candidate) || candidate.startsWith("~") || candidate.startsWith("/") || candidate.startsWith("\\")) return null;
+	if (candidate.split(/[\\/]/).some((segment) => segment === ".." || segment === ".")) return null;
+	if (!PREVIEWABLE_EXTENSIONS.has(previewPathExtension(candidate))) return null;
+	return candidate.replace(/\\/g, "/");
+};
+
+const collectPreviewCandidates = (value, files, budget) => {
+	if (budget.decrement() <= 0) return;
+	if (typeof value === "string") {
+		const normalized = normalizePreviewPath(value);
+		if (normalized) files.set(normalized, normalized);
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) collectPreviewCandidates(item, files, budget);
+		return;
+	}
+	if (!value || typeof value !== "object") return;
+	for (const key of ["path", "filePath", "file_path", "output", "file"]) {
+		if (typeof value[key] === "string") collectPreviewCandidates(value[key], files, budget);
+	}
+	for (const entry of Object.entries(value)) {
+		if (entry[0] !== "path" && entry[0] !== "filePath" && entry[0] !== "file_path" && entry[0] !== "output" && entry[0] !== "file")
+			collectPreviewCandidates(entry[1], files, budget);
+	}
+};
+
+function collectPreviewFiles(parts) {
+	const files = new Map();
+	const budget = { remaining: 2000, decrement() { return --this.remaining; } };
+	for (const part of parts) {
+		if (part.type !== "tool") continue;
+		const text = typeof part.text === "string" ? part.text : "";
+		if (!text) continue;
+		let parsed = null;
+		try { parsed = JSON.parse(text); } catch { /* free text below */ }
+		if (parsed !== null) collectPreviewCandidates(parsed, files, budget);
+		for (const match of text.matchAll(/Successfully wrote \d+ bytes to ([^\s"']+)/gi)) {
+			const normalized = normalizePreviewPath(match[1]);
+			if (normalized) files.set(normalized, normalized);
+		}
+		for (const match of text.matchAll(/(?:^|[\s"'`([])([^\s"'`()[\]]+\.(?:md|markdown|html?|json|ya?ml|toml|txt|csv|svg|png|jpe?g|gif|webp|avif|bmp|ico|pdf|docx|xlsx|pptx|zip))(?:[\s"'`()[\],.;:]|$)/gi)) {
+			const normalized = normalizePreviewPath(match[1]);
+			if (normalized) files.set(normalized, normalized);
+		}
+	}
+	return [...files.values()].map((path) => ({ path, name: path.split("/").pop() }));
+}
+
+/** Renders .html files as real pages in a sandboxed (opaque origin) iframe. */
+function htmlPagePlugin() {
+	return {
+		name: "html-page",
+		match(file) {
+			const extension = String(file.extension ?? "").toLowerCase();
+			return extension === "html" || extension === "htm";
+		},
+		async render(ctx) {
+			const iframe = document.createElement("iframe");
+			iframe.classList.add("preview-html-frame");
+			iframe.setAttribute("sandbox", "allow-scripts");
+			iframe.setAttribute("referrerpolicy", "no-referrer");
+			iframe.title = ctx.file.name;
+			ctx.viewport.append(iframe);
+			let blobUrl = null;
+			try {
+				const source = ctx.file.source;
+				if (typeof source === "string") {
+					const response = await fetch(source);
+					if (!response.ok) throw new Error(`HTTP ${response.status}`);
+					const html = await response.text();
+					const charsetMeta = '<meta charset="utf-8">';
+					const withCharset = /<head[^>]*>/i.test(html)
+						? html.replace(/<head([^>]*)>/i, (_match, attributes) => `<head${attributes}>${charsetMeta}`)
+						: `${charsetMeta}${html}`;
+					blobUrl = URL.createObjectURL(new Blob([withCharset], { type: "text/html;charset=utf-8" }));
+					iframe.src = blobUrl;
+				} else {
+					iframe.srcdoc = "";
+				}
+			} catch (error) {
+				ctx.setError(error instanceof Error ? error.message : String(error));
+			}
+			return {
+				destroy() {
+					if (blobUrl) URL.revokeObjectURL(blobUrl);
+					iframe.remove();
+				},
+			};
+		},
+	};
+}
+
+function previewFileUrl(projectId, path) {
+	return `/api/file?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(path)}`;
+}
+
+function updatePreviewButtons() {
+	const panel = byId("preview-panel");
+	const button = panel.querySelector('[data-action="preview-toggle-fullscreen"]');
+	if (!button) return;
+	const fullscreen = previewState?.mode === "full";
+	const key = fullscreen ? "preview.exitFullscreen" : "preview.fullscreen";
+	button.dataset.i18nTitle = key;
+	button.title = t(key);
+	button.setAttribute("aria-label", t(key));
+	const iconSpan = button.querySelector("span[data-icon]");
+	if (iconSpan && iconSpan.dataset.icon !== (fullscreen ? "minimize" : "maximize")) {
+		iconSpan.dataset.icon = fullscreen ? "minimize" : "maximize";
+		hydrateIcons(button);
+	}
+}
+
+function closePreview() {
+	if (previewViewer) {
+		previewViewer.destroy();
+		previewViewer = null;
+	}
+	previewState = null;
+	byId("preview-file-name").textContent = "";
+	byId("preview-file-name").removeAttribute("title");
+	byId("preview-viewer").innerHTML = "";
+	byId("preview-panel").classList.add("hidden");
+	byId("preview-panel").classList.remove("fullscreen");
+	updatePreviewButtons();
+}
+
+async function openPreview(projectId, path) {
+	closePreview();
+	previewState = { projectId, path, mode: "split" };
+	const name = path.split("/").pop() ?? path;
+	byId("preview-file-name").textContent = name;
+	byId("preview-file-name").title = path;
+	const panel = byId("preview-panel");
+	panel.classList.remove("hidden");
+	panel.classList.remove("fullscreen");
+	updatePreviewButtons();
+	try {
+		previewViewer = createViewer({
+			container: byId("preview-viewer"),
+			file: previewFileUrl(projectId, path),
+			fileName: name,
+			plugins: [htmlPagePlugin(), textPlugin(), imagePlugin()],
+			toolbar: { fullscreen: false },
+			theme: desktopState?.settings?.theme === "light" ? "light" : "dark",
+			height: "100%",
+			fallback: "inline",
+		});
+	} catch {
+		showToast(t("preview.failed"), "error");
+	}
+}
+
+function togglePreviewFullscreen() {
+	if (!previewState) return;
+	previewState.mode = previewState.mode === "full" ? "split" : "full";
+	byId("preview-panel").classList.toggle("fullscreen", previewState.mode === "full");
+	updatePreviewButtons();
+	previewViewer?.resize();
 }
 
 function renderActivityPart(part) {
@@ -604,30 +820,43 @@ function renderMessageHtml(message) {
 	}
 	if (!content && !activity && message.status !== "streaming") return "";
 	const status = message.status === "streaming" ? t("message.processing") : t("message.processed");
+	const previewFiles = collectPreviewFiles(message.parts);
 	return `<article class="message assistant" data-message-id="${escapeHtml(message.id)}">
 		<details class="message-activity" data-reasoning-id="${escapeHtml(message.id)}" ${open ? "open" : ""}><summary><span class="activity-toggle" data-icon="chevron-right"></span><span class="activity-status">${escapeHtml(status)}</span>${duration ? `<time class="activity-duration" datetime="${escapeHtml(message.createdAt)}">${escapeHtml(duration)}</time>` : ""}</summary>${activity ? `<blockquote>${activity}</blockquote>` : ""}</details>
 		${content ? `<div class="message-body markdown-body">${renderMarkdown(content)}</div><div class="message-meta assistant-meta"><button data-action="copy-message" data-message-id="${escapeHtml(message.id)}" title="${t("message.copy")}" aria-label="${t("message.copy")}"><span data-icon="copy"></span></button><time datetime="${escapeHtml(message.createdAt)}">${new Date(message.createdAt).toLocaleTimeString(desktopState.settings.locale, { hour: "2-digit", minute: "2-digit" })}</time></div>` : ""}
+		${previewFiles.length > 0 ? `<div class="message-files">${previewFiles.map((file) => `<button class="file-chip" data-action="preview-file" data-file-path="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}" aria-label="${t("preview.open")}"><span data-icon="file-text"></span><span>${escapeHtml(file.name)}</span></button>`).join("")}</div>` : ""}
 	</article>`;
+}
+
+function shouldStickToBottom(container) {
+	return container.scrollHeight - container.scrollTop - container.clientHeight < 72;
+}
+
+function scrollToBottom(container) {
+	container.scrollTop = container.scrollHeight;
 }
 
 function updateMessageNode(messageId) {
 	const container = byId("messages");
+	const stickToBottom = shouldStickToBottom(container);
 	const message = collapseAssistantMessages(desktopState.messages).find((candidate) => candidate.id === messageId);
 	const existing = container.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
 	if (!message || !existing) return false;
 	const html = renderMessageHtml(message);
 	if (!html) {
 		existing.remove();
+		if (stickToBottom) scrollToBottom(container);
 		return true;
 	}
 	existing.outerHTML = html;
 	hydrateIcons(container.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`) ?? container);
+	if (stickToBottom) scrollToBottom(container);
 	return true;
 }
 
 function renderMessages() {
 	const container = byId("messages");
-	const shouldStickToBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 72;
+	const stickToBottom = shouldStickToBottom(container);
 	if (!desktopState.activeProjectId) {
 		container.innerHTML = `<div class="conversation-column"><div class="empty-state"><h1>${t("project.none")}</h1><p>${t("projects.addHint")}</p><div class="form-actions"><button class="text-button primary" data-action="add-project"><span data-icon="folder-plus"></span> ${t("projects.add")}</button></div></div></div>`;
 		hydrateIcons(container);
@@ -640,7 +869,7 @@ function renderMessages() {
 	const messageHtml = collapseAssistantMessages(desktopState.messages).map(renderMessageHtml).filter(Boolean).join("");
 	container.innerHTML = `<div class="conversation-column">${messageHtml}</div>`;
 	hydrateIcons(container);
-	if (shouldStickToBottom) container.scrollTop = container.scrollHeight;
+	if (stickToBottom) scrollToBottom(container);
 }
 
 function renderComposer() {
@@ -733,11 +962,19 @@ function renderModelsSettings(content) {
 
 function renderGeneralSettings(content) {
 	const webSearch = desktopState.settings.webSearch;
+	const availableThinkingLevels =
+		desktopState.runtime?.availableThinkingLevels?.length > 0
+			? desktopState.runtime.availableThinkingLevels
+			: THINKING_LEVELS;
+	const defaultThinkingLevel = desktopState.settings.defaultThinkingLevel;
+	const defaultThinkingOptions = availableThinkingLevels.includes(defaultThinkingLevel)
+		? availableThinkingLevels
+		: [...availableThinkingLevels, defaultThinkingLevel];
 	content.innerHTML = `<section class="settings-section"><h2>${t("settings.general")}</h2>
 		<div class="settings-card"><h3>${t("settings.language")}</h3><form id="locale-form"><label class="form-field"><select name="locale"><option value="zh-CN" ${desktopState.settings.locale === "zh-CN" ? "selected" : ""}>中文</option><option value="en" ${desktopState.settings.locale === "en" ? "selected" : ""}>English</option></select></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
 		<div class="settings-card"><h3>${t("settings.theme")}</h3><p>${t("settings.themeHint")}</p><div class="theme-switch" role="group" aria-label="${escapeHtml(t("settings.theme"))}"><button type="button" class="theme-option ${desktopState.settings.theme === "light" ? "active" : ""}" data-action="change-theme" data-theme="light" aria-pressed="${desktopState.settings.theme === "light"}"><span data-icon="sun"></span><span>${t("theme.light")}</span></button><button type="button" class="theme-option ${desktopState.settings.theme === "dark" ? "active" : ""}" data-action="change-theme" data-theme="dark" aria-pressed="${desktopState.settings.theme === "dark"}"><span data-icon="moon"></span><span>${t("theme.dark")}</span></button></div></div>
 		<div class="settings-card"><h3>${t("settings.fontSize")}</h3><p>${t("settings.fontSizeHint")}</p><form id="font-size-form" class="font-size-form"><label class="range-field"><span>${t("settings.conversationFontSize")} <output id="conversation-font-size-value" for="conversation-font-size">${desktopState.settings.conversationFontSize}px</output></span><input id="conversation-font-size" name="conversationFontSize" type="range" min="14" max="20" step="1" value="${desktopState.settings.conversationFontSize}"></label><label class="range-field"><span>${t("settings.sidebarFontSize")} <output id="sidebar-font-size-value" for="sidebar-font-size">${desktopState.settings.sidebarFontSize}px</output></span><input id="sidebar-font-size" name="sidebarFontSize" type="range" min="12" max="18" step="1" value="${desktopState.settings.sidebarFontSize}"></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
-		<div class="settings-card"><h3>${t("settings.defaultThinking")}</h3><form id="default-thinking-form"><label class="form-field"><select name="defaultThinkingLevel">${["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((level) => `<option value="${level}" ${desktopState.settings.defaultThinkingLevel === level ? "selected" : ""}>${t(`thinking.${level}`)}</option>`).join("")}</select></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
+		<div class="settings-card"><h3>${t("settings.defaultThinking")}</h3><form id="default-thinking-form"><label class="form-field"><select name="defaultThinkingLevel">${defaultThinkingOptions.map((level) => `<option value="${escapeHtml(level)}" ${defaultThinkingLevel === level ? "selected" : ""}>${t(`thinking.${level}`)}</option>`).join("")}</select></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
 		<div class="settings-card"><h3>${t("settings.globalPrompt")}</h3><form id="global-prompt-form"><label class="form-field"><textarea name="globalSystemPrompt">${escapeHtml(desktopState.settings.globalSystemPrompt)}</textarea></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
 		<div class="settings-card"><h3>${t("settings.shortcut")}</h3><form id="shortcut-form" class="form-grid"><label class="form-field full"><input name="invokeShortcut" data-shortcut-recorder value="${escapeHtml(desktopState.settings.invokeShortcut)}"></label><div class="form-actions full"><button class="text-button" type="button" data-action="reset-shortcut"><span data-icon="rotate-ccw"></span> ${t("settings.reset")}</button><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
 		<div class="settings-card"><h3>${t("settings.webSearch")}</h3><form id="web-search-form" class="form-grid"><label class="form-field"><span>${t("settings.provider")}</span><select name="provider"><option value="disabled" ${webSearch.provider === "disabled" ? "selected" : ""}>${t("settings.disabled")}</option><option value="deepseek" ${webSearch.provider === "deepseek" ? "selected" : ""}>${t("settings.webSearchDeepseek")}</option><option value="brave" ${webSearch.provider === "brave" ? "selected" : ""}>Brave Search</option><option value="tavily" ${webSearch.provider === "tavily" ? "selected" : ""}>Tavily</option></select>${webSearch.provider === "deepseek" ? `<p class="muted">${t("settings.webSearchDeepseekHint")}</p>` : ""}</label><label class="form-field"><span>${t("settings.apiKey")}</span><input name="apiKey" type="password" autocomplete="new-password" placeholder="${webSearch.credentialRef ? t("settings.apiKeyStored") : ""}"></label><label class="form-field full"><span><input name="clearCredential" type="checkbox"> ${t("settings.clearKey")}</span></label><div class="form-actions full"><button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
@@ -749,7 +986,7 @@ function renderSkillsSettings(content) {
 	const skills = desktopState.commands.filter((commandInfo) => commandInfo.source === "skill");
 	const installations = desktopState.skillInstallations ?? [];
 	content.innerHTML = `<section class="settings-section"><h2>${t("settings.skills")}</h2><p>${skills.length} ${t("settings.configured")}</p>
-		<div class="settings-card"><h3>${t("settings.add")}</h3><form id="skill-install-form" class="form-grid"><label class="form-field full"><span>${t("settings.skillSources")}</span><input name="source" required placeholder="npm:author/skill@1.0.0" aria-label="Skill source"></label><label class="form-field"><span>Scope</span><select name="scope"><option value="global">Global</option><option value="project">Project</option></select></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="download"></span>${t("settings.add")}</button></div></form><form id="skill-directory-form" class="form-grid"><label class="form-field full"><span>${t("settings.directories")}</span><input name="directory" required placeholder="SKILL.md" aria-label="Skill directory"></label><div class="form-actions full"><button class="text-button" type="submit"><span data-icon="folder-plus"></span>${t("settings.add")}</button></div></form>${desktopState.settings.skillDirectories.map((directory) => `<div class="directory-row"><span title="${escapeHtml(directory)}">${escapeHtml(directory)}</span><button class="icon-button" data-action="remove-skill-directory" data-directory="${escapeHtml(directory)}" title="${t("settings.delete")}" aria-label="${t("settings.delete")}"><span data-icon="x"></span></button></div>`).join("")}<div class="form-actions"><button class="text-button" data-action="reload-skills"><span data-icon="refresh-cw"></span>${t("settings.rescan")}</button></div></div>
+		<div class="settings-card"><h3>${t("settings.add")}</h3><form id="skill-install-form" class="form-grid"><label class="form-field full"><span>${t("settings.skillSources")}</span><input name="source" required placeholder="npm:author/skill@1.0.0" aria-label="Skill source"></label><label class="form-field"><span>Scope</span><select name="scope"><option value="global">Global</option><option value="project">Project</option></select></label><div class="form-actions full"><button class="text-button primary" type="submit"><span data-icon="download"></span>${t("settings.add")}</button></div></form><form id="skill-directory-form" class="form-grid"><label class="form-field full"><span>${t("settings.directories")}</span><input name="directory" required placeholder="SKILL.md" aria-label="Skill directory"></label><div class="form-actions full"><button class="text-button" type="submit"><span data-icon="folder-plus"></span>${t("settings.add")}</button></div></form>${desktopState.settings.skillDirectories.map((directory) => `<div class="directory-row"><span title="${escapeHtml(directory)}">${escapeHtml(directory)}</span><button class="icon-button" data-action="remove-skill-directory" data-directory="${escapeHtml(directory)}" title="${t("settings.delete")}" aria-label="${t("settings.delete")}"><span data-icon="x"></span></button></div>`).join("")}<div class="form-actions"><button class="text-button" data-action="reload-skills"><span data-icon="refresh-cw"></span>${t("settings.rescan")}</button></div></div>
 		<div class="settings-card"><h3>${t("settings.loadedCommands")}</h3>${installations.length === 0 && skills.length === 0 ? `<div class="muted">${t("settings.noSkills")}</div>` : (installations.length ? installations : skills).map((skill) => `<div class="directory-row"><span><strong>/${escapeHtml(skill.name ?? skill.commandName?.replace("skill:", "") ?? "")}</strong><br><span class="muted">${escapeHtml(skill.description ?? "")}</span><small>${escapeHtml(skill.status ?? "loaded")} / ${escapeHtml(skill.source?.spec ?? skill.path ?? "")}</small></span>${skill.id ? `<span class="model-actions"><button class="icon-button" data-action="update-skill" data-installation-id="${escapeHtml(skill.id)}" title="${t("settings.update")}" aria-label="${t("settings.update")}"><span data-icon="refresh-cw"></span></button><button class="icon-button" data-action="remove-skill" data-installation-id="${escapeHtml(skill.id)}" title="${t("settings.delete")}" aria-label="${t("settings.delete")}"><span data-icon="trash-2"></span></button></span>` : `<span class="trust-pill">${escapeHtml(skill.scope ?? "temporary")}</span>`}</div>`).join("")}</div>
 	</section>`;
 }
@@ -768,7 +1005,7 @@ function renderMcpSettings(content) {
 			<label class="form-field"><span><input name="enabled" type="checkbox" checked> ${t("settings.enabled")}</span></label>
 			<div class="form-actions full"><button class="text-button primary" type="submit"><span data-icon="plus"></span>${t("settings.addServer")}</button></div>
 		</form></div>
-		<div class="settings-card"><h3>${t("settings.importJson")}</h3><form id="mcp-import-form" class="form-grid"><label class="form-field full"><textarea name="json" rows="5" required placeholder='{"mcpServers":{"filesystem":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}}}'></textarea></label><label class="form-field"><span>${t("settings.scope")}</span><select name="scope"><option value="project">Project</option><option value="global">Global</option></select></label><div class="form-actions"><button class="text-button primary" type="submit"><span data-icon="file-input"></span>${t("settings.importJson")}</button></div></form></div>
+		<div class="settings-card"><h3>${t("settings.importJson")}</h3><form id="mcp-import-form" class="form-grid"><label class="form-field full"><textarea name="json" rows="5" required placeholder='{"mcpServers":{"filesystem":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}}}'></textarea></label><label class="form-field"><span>${t("settings.scope")}</span><select name="scope"><option value="project">Project</option><option value="global">Global</option></select></label><div class="form-actions full"><button class="text-button primary" type="submit"><span data-icon="file-input"></span>${t("settings.importJson")}</button></div></form></div>
 		<div class="settings-card"><h3>${t("settings.profiles")}</h3>${servers.length === 0 ? `<div class="muted">${t("settings.noMcp")}</div>` : servers.map((server) => `<div class="model-row"><div class="model-info"><strong>${escapeHtml(server.profile.name)} / ${escapeHtml(server.status)}</strong><span>${escapeHtml(server.profile.launchKind ?? server.profile.transport)} / ${escapeHtml(server.profile.namespace)} / ${server.toolCount} tools / agent: ${escapeHtml(server.agentAvailability ?? "unknown")}${server.lastError ? ` / ${escapeHtml(server.lastError)}` : ""}</span></div><div class="model-actions"><button class="icon-button" data-action="toggle-mcp" data-server-id="${escapeHtml(server.profile.id)}" title="${t("settings.enabled")}" aria-label="${t("settings.enabled")}"><span data-icon="${server.profile.enabled ? "pause" : "play"}"></span></button><button class="icon-button" data-action="test-mcp" data-server-id="${escapeHtml(server.profile.id)}" title="${t("settings.test")}" aria-label="${t("settings.test")}"><span data-icon="plug-zap"></span></button><button class="icon-button" data-action="retry-mcp" data-server-id="${escapeHtml(server.profile.id)}" title="Retry" aria-label="Retry"><span data-icon="refresh-cw"></span></button><button class="icon-button" data-action="delete-mcp" data-server-id="${escapeHtml(server.profile.id)}" title="${t("settings.delete")}" aria-label="${t("settings.delete")}"><span data-icon="trash-2"></span></button></div></div>`).join("")}</div>
 		<div class="form-actions"><button class="text-button" data-action="revoke-mcp-consent"><span data-icon="shield-x"></span>${t("settings.revokePermissions")}</button></div>
 	</section>`;
@@ -806,6 +1043,24 @@ function renderDiagnosticsSettings(content) {
 	content.innerHTML = `<section class="settings-section"><h2>${t("settings.diagnostics")}</h2><p>${diagnostics.length} ${t("settings.recentEvents")}</p><div class="settings-card"><h3>${t("settings.runtime")}</h3><div class="directory-row"><span>${t("settings.status")}</span><strong>${escapeHtml(desktopState.runtime?.status ?? "stopped")}</strong></div><div class="directory-row"><span>Runtime ID</span><strong>${escapeHtml(desktopState.runtime?.runtimeId ?? "-")}</strong></div><div class="directory-row"><span>${t("settings.sessionFile")}</span><strong title="${escapeHtml(desktopState.runtime?.sessionPath ?? "")}">${escapeHtml(desktopState.runtime?.sessionPath ?? "-")}</strong></div><div class="form-actions"><button class="text-button" data-action="export-diagnostics"><span data-icon="download"></span>${t("settings.export")}</button></div></div><div class="settings-card"><h3>${t("settings.recentEvents")}</h3>${diagnostics.length === 0 ? `<div class="muted">${t("settings.noDiagnostics")}</div>` : diagnostics.map((diagnostic) => `<div class="diagnostic-row"><strong>${escapeHtml(diagnostic.level)} / ${escapeHtml(diagnostic.component)}</strong><span>${escapeHtml(diagnostic.message)}</span></div>`).join("")}</div></section>`;
 }
 
+function updateSidebarUI() {
+	const app = byId("app");
+	app.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+	app.classList.toggle("settings-open", settingsOpen);
+	const toggle = document.querySelector('[data-action="toggle-sidebar"]');
+	if (!toggle) return;
+	const key = sidebarCollapsed ? "sidebar.expand" : "sidebar.collapse";
+	toggle.dataset.i18nTitle = key;
+	toggle.title = t(key);
+	toggle.setAttribute("aria-label", t(key));
+	const icon = sidebarCollapsed ? "panel-left-open" : "panel-left-close";
+	const iconSpan = toggle.querySelector("span[data-icon]");
+	if (iconSpan && iconSpan.dataset.icon !== icon) {
+		iconSpan.dataset.icon = icon;
+		hydrateIcons(toggle);
+	}
+}
+
 function render() {
 	applyTheme();
 	applyFontSettings();
@@ -825,6 +1080,7 @@ function render() {
 	renderComposer();
 	byId("chat-view").classList.toggle("hidden", settingsOpen);
 	byId("settings-view").classList.toggle("hidden", !settingsOpen);
+	updateSidebarUI();
 	if (settingsOpen) renderSettings();
 	renderConsentModal();
 }
@@ -1017,6 +1273,7 @@ function applyDesktopEvent(event) {
 		responseStartedAt.clear();
 		responseDurations.clear();
 		stopDurationTicker();
+		closePreview();
 		scheduleRefresh(true);
 		return true;
 	}
@@ -1112,15 +1369,15 @@ document.addEventListener("click", async (event) => {
 	event.preventDefault();
 	const action = actionTarget.dataset.action;
 	if (action === "add-project") await run({ type: "projects.addFromFolder" });
-	else if (action === "select-project") await run({ type: "projects.select", projectId: actionTarget.dataset.projectId });
+	else if (action === "select-project") { closePreview(); await run({ type: "projects.select", projectId: actionTarget.dataset.projectId }); }
 	else if (action === "toggle-project") {
 		const projectId = actionTarget.dataset.projectId;
 		if (collapsedProjects.has(projectId)) collapsedProjects.delete(projectId);
 		else collapsedProjects.add(projectId);
 		renderProjectTree();
 	}
-	else if (action === "new-session") await run({ type: "sessions.create", projectId: actionTarget.dataset.projectId });
-	else if (action === "select-session") await run({ type: "sessions.open", sessionId: actionTarget.dataset.sessionId });
+	else if (action === "new-session") { closePreview(); await run({ type: "sessions.create", projectId: actionTarget.dataset.projectId }); }
+	else if (action === "select-session") { closePreview(); await run({ type: "sessions.open", sessionId: actionTarget.dataset.sessionId }); }
 	else if (action === "rename-context") {
 		const target = contextMenuTarget;
 		hideContextMenu();
@@ -1134,8 +1391,26 @@ document.addEventListener("click", async (event) => {
 			if (name) await run({ type: "projects.rename", projectId: target.id, name });
 		}
 	} else if (action === "set-trust") await run({ type: "projects.setTrust", projectId: actionTarget.dataset.projectId, trustState: actionTarget.dataset.trust });
-	else if (action === "open-settings") { settingsOpen = true; render(); }
-	else if (action === "change-theme") await run({ type: "settings.update", patch: { theme: actionTarget.dataset.theme } }, t("toast.themeSaved"));
+	else if (action === "open-settings") { closePreview(); settingsOpen = true; render(); }
+	else if (action === "toggle-sidebar") {
+		sidebarCollapsed = !sidebarCollapsed;
+		try { localStorage.setItem("pi-sidebar-collapsed", sidebarCollapsed ? "1" : "0"); } catch { /* ignore */ }
+		updateSidebarUI();
+	}
+	else if (action === "change-theme") {
+		await run({ type: "settings.update", patch: { theme: actionTarget.dataset.theme } }, t("toast.themeSaved"));
+		if (previewState) {
+			const { projectId, path } = previewState;
+			closePreview();
+			void openPreview(projectId, path);
+		}
+	}
+	else if (action === "preview-file") {
+		const projectId = desktopState?.activeProjectId;
+		if (projectId && actionTarget.dataset.filePath) await openPreview(projectId, actionTarget.dataset.filePath);
+	}
+	else if (action === "preview-close") closePreview();
+	else if (action === "preview-toggle-fullscreen") togglePreviewFullscreen();
 	else if (action === "consent-respond") {
 		const requestId = byId("consent-modal").dataset.requestId;
 		if (requestId) await run({ type: "mcp.consent.respond", requestId, approved: actionTarget.dataset.approved === "true", scope: actionTarget.dataset.scope });

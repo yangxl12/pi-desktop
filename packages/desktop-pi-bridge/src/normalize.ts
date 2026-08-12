@@ -101,6 +101,14 @@ function normalizeThinkingLevel(value: unknown): ThinkingLevel {
 		: "off";
 }
 
+export function normalizeThinkingLevels(value: unknown): ThinkingLevel[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const levels = value.filter((candidate): candidate is ThinkingLevel =>
+		["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(candidate as string),
+	);
+	return levels.length > 0 ? [...new Set(levels)] : undefined;
+}
+
 export function normalizeState(value: unknown): PiAgentState {
 	const state = record(value) ?? {};
 	const model = record(state.model);

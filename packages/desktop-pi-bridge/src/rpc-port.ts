@@ -15,7 +15,13 @@ import type {
 import type { DesktopMessage, ThinkingLevel } from "@earendil-works/pi-desktop-protocol";
 import { DesktopError } from "@earendil-works/pi-desktop-protocol";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
-import { normalizeCommands, normalizeMessage, normalizePiEvent, normalizeState } from "./normalize.ts";
+import {
+	normalizeCommands,
+	normalizeMessage,
+	normalizePiEvent,
+	normalizeState,
+	normalizeThinkingLevels,
+} from "./normalize.ts";
 import type { RpcCommand, RpcResponse } from "./rpc-types.ts";
 import { PiToolBridge } from "./tool-bridge.ts";
 
@@ -116,6 +122,24 @@ export class RpcPiAgentPort implements PiAgentPort {
 		this.options = options;
 	}
 
+	private async refreshAvailableThinkingLevels(): Promise<void> {
+		const response = await this.send({ type: "get_available_thinking_levels" });
+		const levels = normalizeThinkingLevels((responseData(response) as { levels?: unknown } | undefined)?.levels);
+		if (levels) this.state = { ...this.state, availableThinkingLevels: levels };
+	}
+
+	/** Re-read the authoritative state from Pi, preserving capability data that get_state does not report. */
+	private async refreshStateFromPi(): Promise<PiAgentState> {
+		const response = await this.send({ type: "get_state" });
+		this.state = {
+			...normalizeState(responseData(response)),
+			...(this.state.availableThinkingLevels
+				? { availableThinkingLevels: [...this.state.availableThinkingLevels] }
+				: {}),
+		};
+		return { ...this.state };
+	}
+
 	async start(options: PiRuntimeOptions): Promise<PiAgentState> {
 		await this.stop();
 		this.runtimeOptions = options;
@@ -195,7 +219,8 @@ export class RpcPiAgentPort implements PiAgentPort {
 			await this.toolBridge.waitForHello();
 			await this.toolBridge.replace(this.tools);
 		}
-		this.state.thinkingLevel = options.thinkingLevel;
+		await this.refreshAvailableThinkingLevels();
+		await this.refreshStateFromPi();
 		this.emit({ type: "ready", runtimeId: options.runtimeId, state: { ...this.state } });
 		return { ...this.state };
 	}
@@ -252,9 +277,7 @@ export class RpcPiAgentPort implements PiAgentPort {
 	}
 
 	async getState(): Promise<PiAgentState> {
-		const response = await this.send({ type: "get_state" });
-		this.state = normalizeState(responseData(response));
-		return { ...this.state };
+		return this.refreshStateFromPi();
 	}
 
 	async getMessages(): Promise<DesktopMessage[]> {
@@ -277,6 +300,7 @@ export class RpcPiAgentPort implements PiAgentPort {
 		await this.send({ type: "set_model", provider, modelId });
 		this.state.modelProvider = provider;
 		this.state.modelId = modelId;
+		await this.refreshAvailableThinkingLevels();
 	}
 
 	async setTools(tools: readonly RuntimeToolDefinition[]): Promise<void> {

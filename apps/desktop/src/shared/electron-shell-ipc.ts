@@ -36,6 +36,12 @@ export type ElectronShellEvent =
 	| { type: "pi-desktop.shell.event"; token: string; event: "tray.action"; action: "open" | "settings" | "quit" }
 	| { type: "pi-desktop.shell.event"; token: string; event: "shortcut.trigger"; shortcut: string };
 
+export interface ElectronHostFatalMessage {
+	type: "pi-desktop.host.fatal";
+	token: string;
+	reason: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
@@ -96,4 +102,13 @@ export function isElectronShellEvent(value: unknown): value is ElectronShellEven
 	if (value.event === "tray.action")
 		return value.action === "open" || value.action === "settings" || value.action === "quit";
 	return value.event === "shortcut.trigger" && typeof value.shortcut === "string";
+}
+
+export function isElectronHostFatalMessage(value: unknown): value is ElectronHostFatalMessage {
+	return (
+		isRecord(value) &&
+		value.type === "pi-desktop.host.fatal" &&
+		typeof value.token === "string" &&
+		typeof value.reason === "string"
+	);
 }

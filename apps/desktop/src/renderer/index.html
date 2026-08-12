@@ -5,6 +5,7 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<title>Pi 桌面端</title>
 	<link rel="stylesheet" href="/styles.css">
+	<link rel="stylesheet" href="/vendor/open-file-viewer/style.css">
 </head>
 <body>
 	<div id="app" class="app-shell">
@@ -22,15 +23,18 @@
 		<main class="workspace">
 			<section id="chat-view" class="view">
 				<header class="topbar">
-					<div class="breadcrumb"><span id="project-title">未选择项目</span><span class="crumb-slash">/</span><strong id="session-title">新对话</strong></div>
+					<div class="topbar-left">
+						<button class="icon-button sidebar-toggle" data-action="toggle-sidebar" data-i18n-title="sidebar.collapse" title="收起侧边栏" aria-label="收起侧边栏"><span data-icon="panel-left-close"></span></button>
+						<div class="breadcrumb"><span id="project-title">未选择项目</span><span class="crumb-slash">/</span><strong id="session-title">新对话</strong></div>
+					</div>
 				</header>
 				<div id="trust-banner" class="trust-banner hidden"></div>
 				<div id="messages" class="messages"></div>
 				<div id="error-row" class="error-row hidden"></div>
 				<section class="composer-wrap">
-					<div id="slash-menu" class="slash-menu hidden" role="listbox" aria-label="Commands"></div>
 					<div id="queue-controls" class="queue-controls hidden"><span data-i18n="streaming">生成中</span><button data-queue="steer" data-i18n="stream.steer">插入指令</button><button data-queue="followUp" data-i18n="stream.follow">完成后继续</button></div>
 					<form id="prompt-form" class="composer">
+						<div id="slash-menu" class="slash-menu hidden" role="listbox" aria-label="Commands"></div>
 						<div class="composer-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" tabindex="0" data-i18n-title="prompt.resize" title="调整输入框高度" aria-label="调整输入框高度"></div>
 						<textarea id="prompt-input" rows="3" placeholder="请输入" data-i18n-title="prompt.placeholder" aria-label="请输入" aria-controls="slash-menu" aria-expanded="false" aria-autocomplete="list"></textarea>
 						<div class="composer-footer"><span id="composer-hint" class="muted">Enter 发送，Shift+Enter 换行</span><div class="composer-actions"><label class="composer-model"><span data-i18n="model">模型</span><select id="model-select" aria-label="模型"></select></label><label class="compact-control composer-thinking"><span data-i18n="thinking">思考强度</span><select id="thinking-select" data-i18n-title="thinking" aria-label="思考强度"><option value="off">关闭</option><option value="minimal">极低</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">很高</option><option value="max">最高</option></select></label><button class="icon-button" type="button" data-action="open-settings" data-i18n-title="settings" title="设置" aria-label="设置"><span data-icon="settings"></span></button><button class="icon-button" type="button" data-action="clear-prompt" data-i18n-title="prompt.clear" title="清空消息" aria-label="清空消息"><span data-icon="x"></span></button><button class="send-button" type="submit" data-i18n-title="prompt.send" title="发送消息" aria-label="发送消息"><span data-icon="send"></span></button><button class="stop-button hidden" type="button" data-action="abort" data-i18n-title="prompt.stop" title="停止生成" aria-label="停止生成"><span data-icon="square"></span></button></div></div>
@@ -44,6 +48,16 @@
 					<div id="settings-content" class="settings-content"></div>
 				</div>
 			</section>
+			<aside id="preview-panel" class="preview-panel hidden" aria-label="文件预览">
+				<header class="preview-header">
+					<div class="preview-title"><span id="preview-file-name" class="preview-file-name"></span></div>
+					<div class="preview-actions">
+						<button class="icon-button" data-action="preview-toggle-fullscreen" data-i18n-title="preview.fullscreen" title="全屏预览" aria-label="全屏预览"><span data-icon="maximize"></span></button>
+						<button class="icon-button" data-action="preview-close" data-i18n-title="preview.close" title="关闭预览" aria-label="关闭预览"><span data-icon="x"></span></button>
+					</div>
+				</header>
+				<div id="preview-viewer" class="preview-body"></div>
+			</aside>
 		</main>
 	</div>
 	<div id="toast" class="toast hidden" role="status"></div>

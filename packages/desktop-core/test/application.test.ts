@@ -1,9 +1,10 @@
 import { mkdtemp, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DesktopMessage } from "@earendil-works/pi-desktop-protocol";
 import { describe, expect, it, vi } from "vitest";
 import { DesktopApplication, FakeAgentRuntime, MemoryMetadataRepository, MemorySecretStore } from "../src/index.ts";
-import type { DesktopHostPorts } from "../src/ports.ts";
+import type { DesktopHostPorts, SessionFileRepository, SessionFileSummary } from "../src/ports.ts";
 import type { RuntimeStartOptions, RuntimeState } from "../src/runtime-contract.ts";
 
 class TestWindow {
@@ -95,6 +96,83 @@ class RecordingRuntime extends FakeAgentRuntime {
 	override async start(options: RuntimeStartOptions): Promise<RuntimeState> {
 		this.starts.push({ ...options, skillDirectories: [...options.skillDirectories] });
 		return super.start(options);
+	}
+}
+
+function copyMessage(message: DesktopMessage): DesktopMessage {
+	return { ...message, parts: message.parts.map((part) => ({ ...part })) };
+}
+
+/** Runtime that serves a Pi-compacted context (summary + tail) for the source session only. */
+class CompactedRuntime extends FakeAgentRuntime {
+	private readonly sourcePath: string;
+	private readonly compacted: DesktopMessage[];
+	private currentRef: string | null = null;
+
+	constructor(sourcePath: string, compacted: DesktopMessage[]) {
+		super();
+		this.sourcePath = sourcePath;
+		this.compacted = compacted;
+	}
+
+	override async start(options: RuntimeStartOptions): Promise<RuntimeState> {
+		this.currentRef = options.sessionPath ?? options.sessionRef ?? null;
+		return super.start(options);
+	}
+
+	override async newSession(): Promise<RuntimeState> {
+		const state = await super.newSession();
+		this.currentRef = state.sessionRef ?? null;
+		return state;
+	}
+
+	override async switchSession(sessionRef: string): Promise<RuntimeState> {
+		this.currentRef = sessionRef;
+		return super.switchSession(sessionRef);
+	}
+
+	override async getMessages(): Promise<DesktopMessage[]> {
+		return this.currentRef === this.sourcePath ? this.compacted.map(copyMessage) : [];
+	}
+}
+
+/** Session files that serve the durable JSONL transcript for the source session only. */
+class TranscriptSessionFiles implements SessionFileRepository {
+	private readonly sessionPath: string;
+	private readonly transcript: DesktopMessage[];
+	private readonly summary: SessionFileSummary;
+
+	constructor(sessionPath: string, transcript: DesktopMessage[]) {
+		this.sessionPath = sessionPath;
+		this.transcript = transcript;
+		this.summary = {
+			id: "session-transcript",
+			sessionPath,
+			title: "Compacted session",
+			createdAt: "2026-08-11T00:00:00.000Z",
+			updatedAt: "2026-08-11T01:00:00.000Z",
+			modelProvider: "deepseek",
+			modelId: "deepseek-v4-flash",
+			thinkingLevel: "high",
+			leafId: "leaf-1",
+			hasMessages: true,
+		};
+	}
+
+	async exists(): Promise<boolean> {
+		return true;
+	}
+
+	async read(): Promise<SessionFileSummary> {
+		return this.summary;
+	}
+
+	async scan(): Promise<{ sessions: SessionFileSummary[]; diagnostics: string[] }> {
+		return { sessions: [this.summary], diagnostics: [] };
+	}
+
+	async readMessages(sessionPath: string): Promise<DesktopMessage[]> {
+		return sessionPath === this.sessionPath ? this.transcript.map(copyMessage) : [];
 	}
 }
 
@@ -273,6 +351,34 @@ describe("desktop application", () => {
 		expect(app.getState().runtime?.thinkingLevel).toBe("low");
 		await app.dispatch({ type: "sessions.create", projectId: app.getState().activeProjectId ?? "" });
 		expect(app.getState().runtime?.thinkingLevel).toBe("medium");
+		expect(app.getState().runtime?.availableThinkingLevels).toEqual([
+			"off",
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
+	});
+
+	it("clamps the default thinking level to the active model's supported levels", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-desktop-"));
+		const app = new DesktopApplication({
+			platform: "win32",
+			ports: ports(),
+			pi: new FakeAgentRuntime({ availableThinkingLevels: ["off", "minimal", "low", "medium", "high"] }),
+			metadata: new MemoryMetadataRepository(),
+		});
+		await app.initialize();
+		await app.dispatch({ type: "settings.update", patch: { defaultThinkingLevel: "max" } });
+		await app.dispatch({ type: "projects.add", rootPath: root });
+		expect(app.getState().runtime?.availableThinkingLevels).toEqual(["off", "minimal", "low", "medium", "high"]);
+		await app.dispatch({ type: "agent.setThinkingLevel", level: "xhigh" });
+		expect(app.getState().runtime?.thinkingLevel).toBe("high");
+		await app.dispatch({ type: "sessions.create", projectId: app.getState().activeProjectId ?? "" });
+		expect(app.getState().runtime?.thinkingLevel).toBe("high");
+		expect(app.getState().settings.defaultThinkingLevel).toBe("max");
 	});
 
 	it("auto-enables DeepSeek built-in search when the active model is DeepSeek", async () => {
@@ -424,5 +530,121 @@ describe("desktop application", () => {
 		const response = await app.dispatch({ type: "webSearch.update", provider: "deepseek" });
 		expect(response.success).toBe(true);
 		expect(app.getState().settings.webSearch).toEqual({ provider: "deepseek", credentialRef: null });
+	});
+
+	it("restores the full transcript after Pi compaction makes the runtime context sparse", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-desktop-"));
+		const sessionPath = join(root, ".pi-desktop", "sessions", "compacted.jsonl");
+		const transcript: DesktopMessage[] = [
+			{
+				id: "file-user-1",
+				role: "user",
+				parts: [{ type: "text", text: "generate an html resume" }],
+				createdAt: "2026-08-11T00:00:01.000Z",
+				status: "finished",
+			},
+			{
+				id: "file-assistant-1",
+				role: "assistant",
+				parts: [
+					{
+						type: "tool",
+						text: '{"path":"index.html"}',
+						toolName: "write",
+						toolCallId: "call_1",
+						status: "finished",
+					},
+					{
+						type: "tool",
+						text: "Successfully wrote 1024 bytes to index.html",
+						toolName: "write",
+						toolCallId: "call_1",
+						status: "finished",
+					},
+					{ type: "text", text: "done the artistic html" },
+				],
+				createdAt: "2026-08-11T00:00:02.000Z",
+				status: "finished",
+			},
+			{
+				id: "file-user-2",
+				role: "user",
+				parts: [{ type: "text", text: "follow up" }],
+				createdAt: "2026-08-11T00:00:03.000Z",
+				status: "finished",
+			},
+			{
+				id: "file-assistant-2",
+				role: "assistant",
+				parts: [{ type: "text", text: "final answer" }],
+				createdAt: "2026-08-11T00:00:04.000Z",
+				status: "finished",
+			},
+		];
+		// Pi only serves the compacted context: the compaction summary (which the
+		// desktop normalizes to an empty tool part) plus the recent tail.
+		const compacted: DesktopMessage[] = [
+			{
+				id: "summary-1",
+				role: "tool",
+				parts: [{ type: "text", text: "" }],
+				createdAt: "2026-08-11T00:00:05.000Z",
+				status: "finished",
+			},
+			copyMessage(transcript[3]),
+		];
+		const app = new DesktopApplication({
+			platform: "win32",
+			ports: ports(),
+			pi: new CompactedRuntime(sessionPath, compacted),
+			metadata: new MemoryMetadataRepository(),
+			sessionFiles: new TranscriptSessionFiles(sessionPath, transcript),
+		});
+		await app.initialize();
+		await app.dispatch({ type: "projects.add", rootPath: root });
+		expect(
+			app
+				.getState()
+				.messages.some(
+					(message) => message.role === "user" && message.parts[0]?.text === "generate an html resume",
+				),
+		).toBe(true);
+		expect(
+			app
+				.getState()
+				.messages.some((message) =>
+					message.parts.some((part) => part.type === "tool" && part.text.includes("Successfully wrote")),
+				),
+		).toBe(true);
+		expect(
+			app.getState().messages.some((message) => message.parts.some((part) => part.text === "final answer")),
+		).toBe(true);
+		expect(
+			app
+				.getState()
+				.messages.some(
+					(message) => message.role === "tool" && message.parts.every((part) => part.text.trim() === ""),
+				),
+		).toBe(false);
+
+		// Switching to a new session and back must keep showing the full transcript.
+		const firstSessionId = app.getState().conversations[0].id;
+		const activeProjectId = app.getState().activeProjectId;
+		expect(activeProjectId).not.toBeNull();
+		await app.dispatch({ type: "sessions.create", projectId: activeProjectId ?? "" });
+		await app.dispatch({ type: "sessions.open", sessionId: firstSessionId });
+		const restored = app.getState().messages;
+		expect(
+			restored.some((message) => message.role === "user" && message.parts[0]?.text === "generate an html resume"),
+		).toBe(true);
+		expect(
+			restored.some((message) =>
+				message.parts.some((part) => part.type === "tool" && part.text.includes("Successfully wrote")),
+			),
+		).toBe(true);
+		expect(restored.some((message) => message.parts.some((part) => part.text === "final answer"))).toBe(true);
+		expect(
+			restored.some((message) => message.role === "tool" && message.parts.every((part) => part.text.trim() === "")),
+		).toBe(false);
 	});
 });

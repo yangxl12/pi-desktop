@@ -25,3 +25,6 @@ dist/
 *.swp
 *.swo
 *~
+
+# Generated file preview vendor bundle
+apps/desktop/src/renderer/vendor/
