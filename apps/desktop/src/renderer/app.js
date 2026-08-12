@@ -153,6 +153,7 @@ const translations = {
 		"preview.exitFullscreen": "退出全屏",
 		"preview.close": "关闭预览",
 		"preview.failed": "文件不存在或暂时无法读取",
+		"preview.notFound": "文件不在当前项目目录中，无法预览",
 		"toast.saved": "已保存",
 		"toast.copied": "消息已复制",
 		"toast.modelSaved": "模型已保存",
@@ -314,6 +315,7 @@ const translations = {
 		"preview.exitFullscreen": "Exit fullscreen",
 		"preview.close": "Close preview",
 		"preview.failed": "File not found or unreadable",
+		"preview.notFound": "File is not inside the current project directory",
 		"toast.saved": "Saved",
 		"toast.copied": "Message copied",
 		"toast.modelSaved": "Model saved",
@@ -622,7 +624,7 @@ function renderMarkdown(value) {
 	html = html.replace(/^### (.*)$/gm, "<h3>$1</h3>").replace(/^## (.*)$/gm, "<h2>$1</h2>").replace(/^# (.*)$/gm, "<h1>$1</h1>");
 	html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>");
 	html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
-	html = html.replace(/\[([^\]]+)\]\(([^)"']+\.(?:md|markdown|html?|json|ya?ml|toml|txt|csv|svg|png|jpe?g|gif|webp|avif|bmp|ico|pdf|docx|xlsx|pptx|zip))\)/gi, (_match, label, filePath) => `<a href="#" data-action="preview-file" data-file-path="${filePath}" title="${t("preview.open")}">${label}</a>`);
+	html = html.replace(/\[([^\]]+)\]\(([^)"']+\.(?:md|markdown|html?|json|ya?ml|toml|txt|csv|svg|png|jpe?g|gif|webp|avif|bmp|ico|pdf|docx|xlsx|pptx|zip))\)/gi, (_match, label, filePath) => `<a href="#" data-action="preview-file" data-file-path="${escapeHtml(filePath)}" title="${t("preview.open")}">${label}</a>`);
 	return html.replace(/\n/g, "<br>");
 }
 
@@ -631,19 +633,39 @@ const previewPathExtension = (path) => {
 	return match ? match[1].toLowerCase() : "";
 };
 
+/** Rejects strings that are not plausible relative file paths (e.g. shell commands). */
+const isPlausiblePreviewPath = (candidate) => !/[\s"'`()[\]{};|&<>$]/.test(candidate);
+
 const normalizePreviewPath = (value) => {
 	const candidate = String(value ?? "").trim().replace(/^["'`]+|["'`]+$/g, "").replace(/^\.\//, "");
 	if (!candidate || candidate.length > 4096) return null;
 	if (/^(https?:)?\/\//i.test(candidate) || /^[A-Za-z]:[\\/]/.test(candidate) || candidate.startsWith("~") || candidate.startsWith("/") || candidate.startsWith("\\")) return null;
 	if (candidate.split(/[\\/]/).some((segment) => segment === ".." || segment === ".")) return null;
+	if (!isPlausiblePreviewPath(candidate)) return null;
 	if (!PREVIEWABLE_EXTENSIONS.has(previewPathExtension(candidate))) return null;
 	return candidate.replace(/\\/g, "/");
+};
+
+/** Convert an absolute path inside the active project root to a project-relative one. */
+const projectRelativePath = (value) => {
+	const candidate = String(value ?? "").trim().replace(/^["'`]+|["'`]+$/g, "");
+	if (!candidate || candidate.length > 4096) return null;
+	if (!/^[A-Za-z]:[\\/]/.test(candidate)) return null;
+	const project = (desktopState?.projects ?? []).find((entry) => entry.id === desktopState?.activeProjectId);
+	if (!project?.rootPath) return null;
+	const root = String(project.rootPath).replace(/\\/g, "/").replace(/\/+$/, "");
+	const normalized = candidate.replace(/\\/g, "/");
+	const rootLower = root.toLowerCase();
+	const candidateLower = normalized.toLowerCase();
+	if (!candidateLower.startsWith(rootLower)) return null;
+	const remainder = normalized.slice(root.length).replace(/^\/+/, "");
+	return remainder ? normalizePreviewPath(remainder) : null;
 };
 
 const collectPreviewCandidates = (value, files, budget) => {
 	if (budget.decrement() <= 0) return;
 	if (typeof value === "string") {
-		const normalized = normalizePreviewPath(value);
+		const normalized = normalizePreviewPath(value) ?? projectRelativePath(value);
 		if (normalized) files.set(normalized, normalized);
 		return;
 	}
@@ -672,15 +694,139 @@ function collectPreviewFiles(parts) {
 		try { parsed = JSON.parse(text); } catch { /* free text below */ }
 		if (parsed !== null) collectPreviewCandidates(parsed, files, budget);
 		for (const match of text.matchAll(/Successfully wrote \d+ bytes to ([^\s"']+)/gi)) {
-			const normalized = normalizePreviewPath(match[1]);
+			const normalized = normalizePreviewPath(match[1]) ?? projectRelativePath(match[1]);
 			if (normalized) files.set(normalized, normalized);
 		}
 		for (const match of text.matchAll(/(?:^|[\s"'`([])([^\s"'`()[\]]+\.(?:md|markdown|html?|json|ya?ml|toml|txt|csv|svg|png|jpe?g|gif|webp|avif|bmp|ico|pdf|docx|xlsx|pptx|zip))(?:[\s"'`()[\],.;:]|$)/gi)) {
-			const normalized = normalizePreviewPath(match[1]);
+			const normalized = normalizePreviewPath(match[1]) ?? projectRelativePath(match[1]);
 			if (normalized) files.set(normalized, normalized);
 		}
 	}
 	return [...files.values()].map((path) => ({ path, name: path.split("/").pop() }));
+}
+
+/** Max inlined sub-resources (count/bytes) per HTML preview. */
+const PREVIEW_INLINE_MAX_COUNT = 64;
+const PREVIEW_INLINE_MAX_BYTES = 8 * 1024 * 1024;
+
+/** Resolve a relative reference from an HTML page into a preview endpoint URL. */
+function previewResourceUrl(projectId, baseDir, reference) {
+	let ref = String(reference ?? "").trim();
+	if (!ref || ref.startsWith("#") || ref.startsWith("data:") || ref.startsWith("blob:")) return null;
+	if (/^(https?:)?\/\//i.test(ref)) return null;
+	if (ref.startsWith("/")) ref = ref.replace(/^\/+/, "");
+	const segments = [];
+	for (const segment of `${baseDir}${ref}`.split("/")) {
+		if (!segment || segment === ".") continue;
+		if (segment === "..") {
+			if (segments.length === 0) return null;
+			segments.pop();
+			continue;
+		}
+		segments.push(segment);
+	}
+	if (segments.length === 0) return null;
+	return previewFileUrl(projectId, segments.join("/"));
+}
+
+function previewFetchBlob(url) {
+	return fetch(url, { cache: "no-store" }).then((response) => (response.ok ? response.blob() : null));
+}
+
+function previewDataUrl(blob) {
+	return new Promise((resolve) => {
+		const reader = new FileReader();
+		reader.onload = () => resolve(reader.result);
+		reader.onerror = () => resolve(null);
+		reader.readAsDataURL(blob);
+	});
+}
+
+/**
+ * Rewrites the HTML page so it renders fully inside the sandboxed (opaque
+ * origin) blob iframe: relative CSS/images/scripts are fetched through the
+ * preview endpoint by the parent (which carries the session cookie) and
+ * inlined as <style>/<script>/data: URIs. Without this, every relative
+ * reference would resolve against blob: and fail, leaving a blank page.
+ */
+async function inlinePreviewHtml(source, html) {
+	const url = new URL(source, window.location.href);
+	const projectId = url.searchParams.get("projectId") ?? "";
+	const pagePath = url.searchParams.get("path") ?? "";
+	const baseDir = pagePath.includes("/") ? pagePath.slice(0, pagePath.lastIndexOf("/") + 1) : "";
+	const budget = { count: 0, bytes: 0 };
+	const doc = new DOMParser().parseFromString(html, "text/html");
+	if (!doc || !doc.documentElement) return html;
+
+	const inlineCssUrls = async (cssUrl, cssText) => {
+		const cssPath = cssUrl.searchParams.get("path") ?? "";
+		const cssDir = cssPath.includes("/") ? cssPath.slice(0, cssPath.lastIndexOf("/") + 1) : "";
+		let output = "";
+		let cursor = 0;
+		const pattern = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+		let match;
+		while ((match = pattern.exec(cssText))) {
+			output += cssText.slice(cursor, match.index);
+			const reference = match[2].trim();
+			const resolved = previewResourceUrl(projectId, cssDir, reference);
+			const blob =
+				resolved &&
+				budget.count < PREVIEW_INLINE_MAX_COUNT &&
+				budget.bytes < PREVIEW_INLINE_MAX_BYTES
+					? await previewFetchBlob(resolved)
+					: null;
+			if (blob) {
+				budget.count += 1;
+				budget.bytes += blob.size;
+				const dataUrl = await previewDataUrl(blob);
+				if (dataUrl) {
+					output += `url("${dataUrl}")`;
+					cursor = match.index + match[0].length;
+					continue;
+				}
+			}
+			output += match[0];
+			cursor = match.index + match[0].length;
+		}
+		return output + cssText.slice(cursor);
+	};
+
+	const inlineElements = async (elements, attribute, kind) => {
+		for (const element of [...elements]) {
+			const reference = element.getAttribute(attribute);
+			if (!reference || budget.count >= PREVIEW_INLINE_MAX_COUNT || budget.bytes >= PREVIEW_INLINE_MAX_BYTES) continue;
+			const resolved = previewResourceUrl(projectId, baseDir, reference);
+			const blob = resolved ? await previewFetchBlob(resolved) : null;
+			if (!blob) continue;
+			budget.count += 1;
+			budget.bytes += blob.size;
+			if (kind === "stylesheet") {
+				const style = document.createElement("style");
+				style.textContent = await inlineCssUrls(new URL(resolved, window.location.href), await blob.text());
+				element.replaceWith(style);
+			} else if (kind === "script") {
+				const script = document.createElement("script");
+				const type = element.getAttribute("type");
+				if (type) script.setAttribute("type", type);
+				script.textContent = await blob.text();
+				element.replaceWith(script);
+			} else {
+				const dataUrl = await previewDataUrl(blob);
+				if (dataUrl) element.setAttribute(attribute, dataUrl);
+			}
+		}
+	};
+
+	await inlineElements(doc.querySelectorAll('link[rel~="stylesheet"][href]'), "href", "stylesheet");
+	await inlineElements(doc.querySelectorAll('img[src]'), "src", "src");
+	await inlineElements(doc.querySelectorAll('script[src]'), "src", "script");
+	await inlineElements(doc.querySelectorAll('source[src]'), "src", "src");
+	if (!doc.querySelector("meta[charset]")) {
+		const meta = doc.createElement("meta");
+		meta.setAttribute("charset", "utf-8");
+		doc.head?.prepend(meta);
+	}
+	return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`;
 }
 
 /** Renders .html files as real pages in a sandboxed (opaque origin) iframe. */
@@ -705,11 +851,9 @@ function htmlPagePlugin() {
 					const response = await fetch(source);
 					if (!response.ok) throw new Error(`HTTP ${response.status}`);
 					const html = await response.text();
-					const charsetMeta = '<meta charset="utf-8">';
-					const withCharset = /<head[^>]*>/i.test(html)
-						? html.replace(/<head([^>]*)>/i, (_match, attributes) => `<head${attributes}>${charsetMeta}`)
-						: `${charsetMeta}${html}`;
-					blobUrl = URL.createObjectURL(new Blob([withCharset], { type: "text/html;charset=utf-8" }));
+					blobUrl = URL.createObjectURL(
+						new Blob([await inlinePreviewHtml(source, html)], { type: "text/html;charset=utf-8" }),
+					);
 					iframe.src = blobUrl;
 				} else {
 					iframe.srcdoc = "";
@@ -763,6 +907,16 @@ function closePreview() {
 
 async function openPreview(projectId, path) {
 	closePreview();
+	const url = previewFileUrl(projectId, path);
+	try {
+		const probe = await fetch(url, { method: "HEAD", cache: "no-store" });
+		if (!probe.ok) {
+			showToast(t(probe.status === 404 ? "preview.notFound" : "preview.failed"), "error");
+			return;
+		}
+	} catch {
+		// The host may be unavailable; still attempt the preview and surface the real error there.
+	}
 	previewState = { projectId, path, mode: "split" };
 	const name = path.split("/").pop() ?? path;
 	byId("preview-file-name").textContent = name;
@@ -774,7 +928,7 @@ async function openPreview(projectId, path) {
 	try {
 		previewViewer = createViewer({
 			container: byId("preview-viewer"),
-			file: previewFileUrl(projectId, path),
+			file: url,
 			fileName: name,
 			plugins: [htmlPagePlugin(), textPlugin(), imagePlugin()],
 			toolbar: { fullscreen: false },

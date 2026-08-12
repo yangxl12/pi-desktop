@@ -36,6 +36,11 @@ await writeFile(
 	join(fixtureDirectory, "chart.png"),
 	Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"),
 );
+await writeFile(
+	join(fixtureDirectory, "page-rel.html"),
+	`<!doctype html><html><head><meta charset="utf-8"><title>rel</title><link rel="stylesheet" href="rel-style.css"></head><body><h1 id="rel-title">REL TITLE</h1><img id="rel-img" src="chart.png" width="20"><p>relative resources</p></body></html>`,
+);
+await writeFile(join(fixtureDirectory, "rel-style.css"), "#rel-title { color: rgb(255, 0, 0); }");
 
 function state() {
 	return {
@@ -99,6 +104,25 @@ function state() {
 				createdAt: "2026-08-05T00:00:00.000Z",
 				status: "finished",
 			},
+			{
+				id: "assistant-2",
+				role: "assistant",
+				parts: [
+					{
+						type: "text",
+						text: "相对资源页面 [相对页面](page-rel.html)，缺失文件 [缺失文件](missing.png)。",
+					},
+					{
+						type: "tool",
+						text: `Successfully wrote 500 bytes to ${join(fixtureDirectory, "page-rel.html")}`,
+						toolName: "write",
+						toolCallId: "call-2",
+						status: "finished",
+					},
+				],
+				createdAt: "2026-08-05T00:00:01.000Z",
+				status: "finished",
+			},
 		],
 		models: [],
 		commands: [],
@@ -128,6 +152,7 @@ function state() {
 
 function contentType(pathname) {
 	if (pathname.endsWith(".css")) return "text/css; charset=utf-8";
+	if (pathname.endsWith(".png")) return "image/png";
 	if (pathname.endsWith(".js") || pathname.endsWith(".mjs")) return "text/javascript; charset=utf-8";
 	return "text/html; charset=utf-8";
 }
@@ -177,9 +202,14 @@ async function startHarness() {
 			return;
 		}
 		if (pathname === "/api/file") {
-			const filePath = resolveStatic(fixtureDirectory, decodeURIComponent(url.searchParams.get("path") ?? ""));
-			response.writeHead(200, { "content-type": contentType(filePath), "cache-control": "no-store" });
-			response.end(await readFile(filePath));
+			try {
+				const filePath = resolveStatic(fixtureDirectory, decodeURIComponent(url.searchParams.get("path") ?? ""));
+				const content = await readFile(filePath);
+				response.writeHead(200, { "content-type": contentType(filePath), "cache-control": "no-store" });
+				response.end(content);
+			} catch {
+				if (!response.headersSent) response.writeHead(404).end("Not found");
+			}
 			return;
 		}
 		try {
@@ -250,7 +280,8 @@ async function assertPreview(page, label) {
 		if (message.type() === "error") pageErrors.push(`console: ${message.text()}`);
 	});
 	page.on("response", (response) => {
-		if (response.status() >= 400) pageErrors.push(`http ${response.status()}: ${response.url()}`);
+		if (response.status() >= 400 && !response.url().includes("missing.png"))
+			pageErrors.push(`http ${response.status()}: ${response.url()}`);
 	});
 	await page.goto(process.env.PI_DESKTOP_E2E_URL, { timeout: 90_000 });
 
@@ -258,10 +289,11 @@ async function assertPreview(page, label) {
 	await page.locator(".message.assistant").waitFor();
 
 	// Chip from the tool result; anchors from the markdown links
-	assert.equal(await page.locator(".file-chip").count(), 1, "one preview chip from the tool result");
+	assert.equal(await page.locator(".file-chip").count(), 2, "one preview chip per tool result");
 	const chipNames = await page.locator(".file-chip span").allTextContents();
 	assert.ok(chipNames.includes("notes.md"), `chip names include notes.md: ${chipNames.join(",")}`);
-	assert.equal(await page.locator('.markdown-body a[data-action="preview-file"]').count(), 3, "markdown preview links");
+	assert.ok(chipNames.includes("page-rel.html"), `chip names include page-rel.html: ${chipNames.join(",")}`);
+	assert.equal(await page.locator('.markdown-body a[data-action="preview-file"]').count(), 5, "markdown preview links");
 
 	// Open the markdown file from the chip
 	await page.locator('.file-chip[data-file-path="notes.md"]').click();
@@ -280,6 +312,30 @@ async function assertPreview(page, label) {
 	assert.equal(await page.locator(".preview-html-frame").getAttribute("sandbox"), "allow-scripts");
 
 	// Image preview via the markdown link
+	await page.locator('.markdown-body a[data-action="preview-file"][data-file-path="chart.png"]').click();
+	await page.locator(".ofv-root img").waitFor({ timeout: 30_000 });
+
+	// HTML with relative css/image resources renders inside the sandboxed iframe
+	await page.locator('.markdown-body a[data-action="preview-file"][data-file-path="page-rel.html"]').click();
+	const relFrame = page.frameLocator("iframe.preview-html-frame");
+	await relFrame.locator("#rel-title").waitFor({ timeout: 30_000 });
+	assert.equal(await relFrame.locator("#rel-title").evaluate((el) => getComputedStyle(el).color), "rgb(255, 0, 0)", "relative stylesheet inlined");
+	assert.ok(
+		await relFrame.locator("#rel-img").evaluate((el) => el.complete && el.naturalWidth > 0),
+		"relative image inlined",
+	);
+
+	// A file outside the project directory closes the panel and shows a clear error.
+	// The 404 for the probe is expected here, so reset the error log around this step.
+	pageErrors.length = 0;
+	await page.locator('.markdown-body a[data-action="preview-file"][data-file-path="missing.png"]').click();
+	await page.waitForTimeout(1200);
+	assert.equal(await panel.isVisible(), false, "panel hidden for missing file");
+	assert.equal(await page.locator("#toast").isVisible(), true, "missing file shows a toast");
+	assert.ok((await page.locator("#toast").innerText()).includes("项目"), "toast mentions the project directory");
+	pageErrors.length = 0;
+
+	// Reopen a file so the panel is visible again for the fullscreen flow
 	await page.locator('.markdown-body a[data-action="preview-file"][data-file-path="chart.png"]').click();
 	await page.locator(".ofv-root img").waitFor({ timeout: 30_000 });
 

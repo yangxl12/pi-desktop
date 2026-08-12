@@ -44,12 +44,15 @@ function deny(
 /**
  * Serve a project file for the preview panel. The path is validated against
  * the project root (no traversal, no absolute paths) and capped in size.
+ * HEAD requests only return headers so the renderer can probe existence
+ * without transferring the file.
  */
 export async function serveProjectFile(
 	projects: readonly PreviewProjectState[],
 	projectId: string,
 	requestedPath: string,
 	response: ServerResponse,
+	isHead = false,
 ): Promise<void> {
 	if (!projectId) return deny(response, 400, "INVALID_ARGUMENT", "projectId is required");
 	if (!requestedPath) return deny(response, 400, "INVALID_ARGUMENT", "path is required");
@@ -71,13 +74,19 @@ export async function serveProjectFile(
 			deny(response, 413, "INVALID_ARGUMENT", "File is too large to preview", { maxBytes: PREVIEW_MAX_BYTES });
 			return;
 		}
-		const content = await readFile(filePath);
-		response.writeHead(200, {
+		const headers = {
 			"content-type": previewFileContentType(filePath),
-			"content-length": content.byteLength,
+			"content-length": isHead ? info.size : undefined,
 			"cache-control": "no-store",
 			"x-content-type-options": "nosniff",
-		});
+		};
+		if (isHead) {
+			response.writeHead(200, headers);
+			response.end();
+			return;
+		}
+		const content = await readFile(filePath);
+		response.writeHead(200, { ...headers, "content-length": content.byteLength });
 		response.end(content);
 	} catch {
 		deny(response, 404, "NOT_FOUND", "File not found");

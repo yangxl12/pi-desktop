@@ -94,8 +94,8 @@ describe("desktop host HTTP gateway", () => {
 		await new Promise<void>((resolve) => gateway.server.once("listening", () => resolve()));
 		const port = (gateway.server.address() as AddressInfo).port;
 		const base = { "x-pi-desktop-token": "test-token" };
-		const fetchFile = (params: string) =>
-			fetch(`http://127.0.0.1:${port}/api/file?${params}`, { headers: base });
+		const fetchFile = (params: string, method: "GET" | "HEAD" = "GET") =>
+			fetch(`http://127.0.0.1:${port}/api/file?${params}`, { method, headers: base });
 
 		const missing = await fetchFile("projectId=p1&path=nope.md");
 		expect(missing.status).toBe(404);
@@ -125,6 +125,16 @@ describe("desktop host HTTP gateway", () => {
 		const nested = await fetchFile("projectId=p1&path=nested%2Fimage.svg");
 		expect(nested.status).toBe(200);
 		expect(nested.headers.get("content-type")).toContain("image/svg+xml");
+
+		const head = await fetchFile("projectId=p1&path=notes.md", "HEAD");
+		expect(head.status).toBe(200);
+		expect(head.headers.get("content-type")).toContain("text/markdown");
+		expect(head.headers.get("content-length")).toBe(String(Buffer.byteLength("# 笔记\n\n预览内容")));
+		expect(head.headers.get("x-content-type-options")).toBe("nosniff");
+		expect(await head.text()).toBe("");
+
+		const headMissing = await fetchFile("projectId=p1&path=nope.md", "HEAD");
+		expect(headMissing.status).toBe(404);
 
 		await gateway.close();
 	});

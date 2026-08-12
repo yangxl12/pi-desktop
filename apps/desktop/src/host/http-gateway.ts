@@ -390,13 +390,14 @@ export function createDesktopHostHttpServer(options: DesktopHostHttpServerOption
 				events.connect(response, request.headers["last-event-id"] as string | undefined, options.app.getState());
 				return;
 			}
-			if (request.method === "GET" && pathname === "/api/file") {
+			if ((request.method === "GET" || request.method === "HEAD") && pathname === "/api/file") {
 				const url = new URL(request.url ?? "/", "http://127.0.0.1");
 				await serveProjectFile(
 					projectsFromState(options.app.getState()),
 					url.searchParams.get("projectId") ?? "",
 					url.searchParams.get("path") ?? "",
 					response,
+					request.method === "HEAD",
 				);
 				return;
 			}
