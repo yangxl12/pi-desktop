@@ -437,7 +437,13 @@ export class DesktopApplication {
 			settings: () => void this.showWindow(),
 			quit: () => void this.quit(),
 		});
-		await this.registerShortcut(this.settings.invokeShortcut);
+		try {
+			await this.registerShortcut(this.settings.invokeShortcut);
+		} catch (error: unknown) {
+			// A conflicting global shortcut (e.g. taken by another app) must not
+			// take down the whole host; surface it in diagnostics instead.
+			this.recordDiagnostic("warning", "shortcut", toDesktopError(error).message);
+		}
 		this.initialized = true;
 		const lastProject = this.projects[0];
 		if (lastProject) {

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { FolderPickerPort, ModelConnectionTester, SecretStore } from "@earendil-works/pi-desktop-core";
-import type { ModelProfile } from "@earendil-works/pi-desktop-protocol";
+import { DesktopError, type ModelProfile } from "@earendil-works/pi-desktop-protocol";
 
 interface ProcessResult {
 	code: number | null;
@@ -127,6 +127,16 @@ export class PlatformSecretStore implements SecretStore {
 	}
 }
 
+/**
+ * PowerShell 5.1 writes redirected stdout in the system code page (e.g. GBK on
+ * zh-CN) unless told otherwise. Folder paths picked by a Chinese user would
+ * otherwise arrive in the host as mojibake and project addition would fail.
+ * The explicit UTF-8 preset keeps the picked path round-trip safe.
+ */
+export function windowsFolderPickerScript(): string {
+	return "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $shell=New-Object -ComObject Shell.Application; $folder=$shell.BrowseForFolder(0,'Select project folder',0,0); if ($folder) { $folder.Self.Path }";
+}
+
 export class NativeFolderPickerPort implements FolderPickerPort {
 	private readonly platform: NodeJS.Platform;
 
@@ -136,13 +146,20 @@ export class NativeFolderPickerPort implements FolderPickerPort {
 
 	async selectProjectFolder(): Promise<string | null> {
 		if (this.platform === "win32") {
-			const script =
-				"$shell=New-Object -ComObject Shell.Application; $folder=$shell.BrowseForFolder(0,'Select project folder',0,0); if ($folder) { $folder.Self.Path }";
 			try {
-				const result = await runProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
-				return result.code === 0 ? result.stdout.trim() || null : null;
-			} catch {
-				return null;
+				const result = await runProcess("powershell.exe", [
+					"-NoProfile",
+					"-NonInteractive",
+					"-Command",
+					windowsFolderPickerScript(),
+				]);
+				if (result.code !== 0)
+					throw new Error(result.stderr.trim() || `Folder picker exited with code ${result.code}`);
+				return result.stdout.trim() || null;
+			} catch (error: unknown) {
+				throw new DesktopError("PROCESS_ERROR", "Native folder picker failed", {
+					cause: error instanceof Error ? error.message : String(error),
+				});
 			}
 		}
 		if (this.platform === "darwin") {

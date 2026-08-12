@@ -225,6 +225,22 @@ describe("desktop application", () => {
 		expect(shortcut.registered()).toContain("Alt+Shift+O");
 	});
 
+	it("keeps the host alive when the default shortcut is already taken at startup", async () => {
+		// Regression: a conflicting global shortcut (taken by another app) used
+		// to crash the whole host during initialize; it must degrade to a
+		// diagnostic instead.
+		const shortcut = new TestShortcut();
+		shortcut.register("Alt+Shift+O", () => undefined);
+		const app = new DesktopApplication({
+			platform: "win32",
+			ports: { ...ports(), shortcut },
+			pi: new FakeAgentRuntime(),
+			metadata: new MemoryMetadataRepository(),
+		});
+		await expect(app.initialize()).resolves.toBeDefined();
+		expect(app.getState().diagnostics.some((d) => d.component === "shortcut")).toBe(true);
+	});
+
 	it("keeps a new session out of history until Pi has produced a reply", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-desktop-"));
 		const app = new DesktopApplication({

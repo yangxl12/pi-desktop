@@ -1,9 +1,11 @@
-import { build } from "esbuild";
-import { access, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { build as buildWithEsbuild } from "esbuild";
+import { build as buildElectronApp } from "electron-builder";
+import { access, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { assertAppAsarSize, createWindowsBuildOptions } from "./windows-builder-options.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = resolve("../..");
@@ -30,11 +32,11 @@ const common = {
 	banner: { js: 'import { createRequire as __piCreateRequire } from "node:module"; const require = __piCreateRequire(import.meta.url);' },
 	treeShaking: false,
 };
-await build({ ...common, entryPoints: [join(root, "apps/desktop/src/electron/main.ts")], outfile: join(workDirectory, "main.mjs"), external: ["electron"] });
-await build({ ...common, entryPoints: [join(root, "apps/desktop/src/host/main.ts")], outfile: join(appResources, "host.mjs") });
-await build({ ...common, entryPoints: [piRpcEntry], outfile: join(appResources, "rpc-entry.mjs") });
-await build({ ...common, entryPoints: [join(appDirectory, "src", "extensions", "web-search.ts")], outfile: join(appResources, "extensions", "web-search.mjs") });
-await build({
+await buildWithEsbuild({ ...common, entryPoints: [join(root, "apps/desktop/src/electron/main.ts")], outfile: join(workDirectory, "main.mjs"), external: ["electron"] });
+await buildWithEsbuild({ ...common, entryPoints: [join(root, "apps/desktop/src/host/main.ts")], outfile: join(appResources, "host.mjs") });
+await buildWithEsbuild({ ...common, entryPoints: [piRpcEntry], outfile: join(appResources, "rpc-entry.mjs") });
+await buildWithEsbuild({ ...common, entryPoints: [join(appDirectory, "src", "extensions", "web-search.ts")], outfile: join(appResources, "extensions", "web-search.mjs") });
+await buildWithEsbuild({
 	...common,
 	entryPoints: [join(root, "packages", "desktop-pi-bridge", "src", "tool-bridge-extension.ts")],
 	outfile: join(appResources, "extensions", "tool-bridge.mjs"),
@@ -91,18 +93,12 @@ const builderConfig = {
 await mkdir(workDirectory, { recursive: true });
 const configPath = join(workDirectory, "electron-builder.json");
 await writeFile(configPath, JSON.stringify(builderConfig, null, 2));
-await execFileAsync(process.execPath, [join(root, "node_modules", "electron-builder", "cli.js"), "--config", configPath, "--win", "nsis", "--x64", "--publish", "never"], {
-	cwd: appDirectory,
-	windowsHide: true,
-	maxBuffer: 50 * 1024 * 1024,
-	env: {
-		...process.env,
-		CSC_IDENTITY_AUTO_DISCOVERY: "false",
-		ELECTRON_MIRROR: process.env.ELECTRON_MIRROR ?? "https://npmmirror.com/mirrors/electron/",
-		ELECTRON_BUILDER_BINARIES_MIRROR: process.env.ELECTRON_BUILDER_BINARIES_MIRROR ?? "https://npmmirror.com/mirrors/electron-builder-binaries/",
-	},
-});
+process.env.CSC_IDENTITY_AUTO_DISCOVERY = "false";
+process.env.ELECTRON_MIRROR ??= "https://npmmirror.com/mirrors/electron/";
+process.env.ELECTRON_BUILDER_BINARIES_MIRROR ??= "https://npmmirror.com/mirrors/electron-builder-binaries/";
+await buildElectronApp(createWindowsBuildOptions(builderConfig, appDirectory));
 const unpackedApp = join(outputDirectory, "win-unpacked", "resources", "app");
+assertAppAsarSize((await stat(join(outputDirectory, "win-unpacked", "resources", "app.asar"))).size);
 for (const relativePath of [
 	"host.mjs",
 	"rpc-entry.mjs",

@@ -138,4 +138,40 @@ describe("desktop host HTTP gateway", () => {
 
 		await gateway.close();
 	});
+
+	it("gives the folder-picker command a long timeout while the native dialog is open", async () => {
+		// Regression: a 30s request timeout used to kill projects.addFromFolder
+		// while the OS folder dialog was still waiting for the user.
+		const app = appStub();
+		app.dispatch = async (command: { type: string }, requestId = "request") => {
+			await new Promise<void>((resolve) => setTimeout(resolve, 300));
+			return { requestId, success: true, data: { command: command.type } };
+		};
+		const gateway = createDesktopHostHttpServer({
+			app,
+			hostToken: "test-token",
+			port: 4317,
+			limits: { requestTimeoutMs: 100, folderPickTimeoutMs: 2_000 },
+		});
+		gateway.server.listen(0, "127.0.0.1");
+		await new Promise<void>((resolve) => gateway.server.once("listening", () => resolve()));
+		const port = (gateway.server.address() as AddressInfo).port;
+		const base = { "x-pi-desktop-token": "test-token", "content-type": "application/json" };
+
+		const pick = await fetch(`http://127.0.0.1:${port}/api/command`, {
+			method: "POST",
+			headers: base,
+			body: JSON.stringify({ requestId: "pick", command: { type: "projects.addFromFolder" } }),
+		});
+		expect(pick.status).toBe(200);
+		expect((await pick.json()).data.command).toBe("projects.addFromFolder");
+
+		const regular = await fetch(`http://127.0.0.1:${port}/api/command`, {
+			method: "POST",
+			headers: base,
+			body: JSON.stringify({ requestId: "regular", command: { type: "app.getState" } }),
+		});
+		expect(regular.status).toBe(408);
+		await gateway.close();
+	});
 });

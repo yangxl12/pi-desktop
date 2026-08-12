@@ -16,6 +16,7 @@ export interface HostHttpLimits {
 	maxSseHistory: number;
 	maxSseBufferBytes: number;
 	requestTimeoutMs: number;
+	folderPickTimeoutMs: number;
 	heartbeatMs: number;
 	maxConcurrentCommands: number;
 }
@@ -27,6 +28,7 @@ export const DEFAULT_HOST_HTTP_LIMITS: HostHttpLimits = {
 	maxSseHistory: 512,
 	maxSseBufferBytes: 1_048_576,
 	requestTimeoutMs: 30_000,
+	folderPickTimeoutMs: 5 * 60_000,
 	heartbeatMs: 15_000,
 	maxConcurrentCommands: 8,
 };
@@ -411,9 +413,13 @@ export function createDesktopHostHttpServer(options: DesktopHostHttpServerOption
 					const requestValue = parseDesktopRequest(
 						await readJsonBody(request, limits.maxBodyBytes, limits.requestTimeoutMs),
 					);
+					const timeoutMs =
+						requestValue.command.type === "projects.addFromFolder"
+							? limits.folderPickTimeoutMs
+							: limits.requestTimeoutMs;
 					const result = await withTimeout(
 						options.app.dispatch(requestValue.command as DesktopCommand, requestValue.requestId),
-						limits.requestTimeoutMs,
+						timeoutMs,
 					);
 					const status = result.success ? 200 : statusForDesktopError(result.error?.code);
 					writeJson(response, status, result, requestValue.requestId);
