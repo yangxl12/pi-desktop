@@ -186,6 +186,22 @@ function ports(): DesktopHostPorts {
 }
 
 describe("desktop application", () => {
+	it("treats a cancelled native folder selection as a no-op", async () => {
+		const app = new DesktopApplication({
+			platform: "win32",
+			ports: { ...ports(), folderPicker: { selectProjectFolder: async () => null } },
+			pi: new FakeAgentRuntime(),
+			metadata: new MemoryMetadataRepository(),
+		});
+		await app.initialize();
+
+		const response = await app.dispatch({ type: "projects.addFromFolder" });
+
+		expect(response).toEqual(expect.objectContaining({ success: true, data: null }));
+		expect(app.getState().projects).toEqual([]);
+		expect(app.getState().diagnostics).toEqual([]);
+	});
+
 	it("creates a runtime and exposes fake Pi streaming events", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-desktop-"));
 		const app = new DesktopApplication({
@@ -375,6 +391,81 @@ describe("desktop application", () => {
 			"high",
 			"xhigh",
 			"max",
+		]);
+	});
+
+	it("falls back from a deleted session model and repairs the conversation index", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-desktop-"));
+		const metadata = new MemoryMetadataRepository();
+		const timestamp = "2026-08-01T00:00:00.000Z";
+		await metadata.saveProject({
+			id: "project-1",
+			name: "Project",
+			rootPath: root,
+			trustState: "trusted",
+			createdAt: timestamp,
+			updatedAt: timestamp,
+			lastOpenedAt: timestamp,
+		});
+		await metadata.saveModel({
+			id: "model-old",
+			providerId: "old-provider",
+			displayName: "Old model",
+			baseUrl: "https://old.example.test/v1",
+			modelId: "old-model",
+			credentialRef: null,
+			enabled: true,
+			createdAt: timestamp,
+			updatedAt: timestamp,
+		});
+		await metadata.saveModel({
+			id: "model-new",
+			providerId: "new-provider",
+			displayName: "New model",
+			baseUrl: "https://new.example.test/v1",
+			modelId: "new-model",
+			credentialRef: null,
+			enabled: true,
+			createdAt: timestamp,
+			updatedAt: timestamp,
+		});
+		await metadata.saveSettings({
+			...(await metadata.loadSettings()),
+			defaultModelProfileId: "model-old",
+		});
+		await metadata.saveConversation({
+			id: "session-1",
+			projectId: "project-1",
+			sessionPath: join(root, "session-1.jsonl"),
+			title: "Existing conversation",
+			createdAt: timestamp,
+			updatedAt: timestamp,
+			modelProvider: "old-provider",
+			modelId: "old-model",
+			thinkingLevel: "high",
+			leafId: null,
+			status: "idle",
+		});
+		const runtime = new RecordingRuntime();
+		const app = new DesktopApplication({
+			platform: "win32",
+			ports: ports(),
+			pi: runtime,
+			metadata,
+		});
+		await app.initialize();
+		await app.dispatch({ type: "projects.select", projectId: "project-1" });
+
+		const response = await app.dispatch({ type: "models.delete", profileId: "model-old" });
+
+		expect(response.success).toBe(true);
+		expect(runtime.starts.at(-1)?.selectedModel).toEqual({ providerId: "new-provider", modelId: "new-model" });
+		expect(app.getState().settings.defaultModelProfileId).toBe("model-new");
+		expect(app.getState().runtime).toEqual(
+			expect.objectContaining({ status: "ready", modelProvider: "new-provider", modelId: "new-model" }),
+		);
+		expect(await metadata.listConversations("project-1")).toEqual([
+			expect.objectContaining({ modelProvider: "new-provider", modelId: "new-model" }),
 		]);
 	});
 

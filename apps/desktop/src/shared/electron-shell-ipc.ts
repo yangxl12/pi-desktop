@@ -1,6 +1,9 @@
 import type { WindowState } from "@earendil-works/pi-desktop-protocol";
 
 export type ElectronShellOperation =
+	| "dialog.selectProjectFolder"
+	| "secret.protect"
+	| "secret.unprotect"
 	| "window.getState"
 	| "window.show"
 	| "window.hide"
@@ -20,6 +23,8 @@ export interface ElectronShellRequest {
 	operation: ElectronShellOperation;
 	shortcut?: string;
 	closeToTray?: boolean;
+	secretValue?: string;
+	protectedValue?: string;
 }
 
 export interface ElectronShellResponse {
@@ -28,6 +33,9 @@ export interface ElectronShellResponse {
 	token: string;
 	success: boolean;
 	state?: WindowState;
+	folderPath?: string | null;
+	secretValue?: string;
+	protectedValue?: string;
 	error?: string;
 }
 
@@ -48,6 +56,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isOperation(value: unknown): value is ElectronShellOperation {
 	return (
+		value === "dialog.selectProjectFolder" ||
+		value === "secret.protect" ||
+		value === "secret.unprotect" ||
 		value === "window.getState" ||
 		value === "window.show" ||
 		value === "window.hide" ||
@@ -80,7 +91,9 @@ export function isElectronShellRequest(value: unknown): value is ElectronShellRe
 		typeof value.token === "string" &&
 		isOperation(value.operation) &&
 		(value.shortcut === undefined || typeof value.shortcut === "string") &&
-		(value.closeToTray === undefined || typeof value.closeToTray === "boolean")
+		(value.closeToTray === undefined || typeof value.closeToTray === "boolean") &&
+		(value.secretValue === undefined || typeof value.secretValue === "string") &&
+		(value.protectedValue === undefined || typeof value.protectedValue === "string")
 	);
 }
 
@@ -92,6 +105,9 @@ export function isElectronShellResponse(value: unknown): value is ElectronShellR
 		typeof value.token === "string" &&
 		typeof value.success === "boolean" &&
 		(value.state === undefined || isWindowState(value.state)) &&
+		(value.folderPath === undefined || value.folderPath === null || typeof value.folderPath === "string") &&
+		(value.secretValue === undefined || typeof value.secretValue === "string") &&
+		(value.protectedValue === undefined || typeof value.protectedValue === "string") &&
 		(value.error === undefined || typeof value.error === "string")
 	);
 }

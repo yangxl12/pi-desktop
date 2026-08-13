@@ -104,7 +104,7 @@ async function main(): Promise<void> {
 	const metadata = new QueuedMetadataRepository(new SqliteMetadataRepository(databasePath));
 	const secrets =
 		platform === "win32" || platform === "darwin"
-			? new PlatformSecretStore(dataDirectory, process.platform)
+			? new PlatformSecretStore(dataDirectory, process.platform, electronPorts?.secretProtection)
 			: new MemorySecretStore();
 	const consent = new ConsentBroker({
 		timeoutMs: 30_000,
@@ -150,7 +150,7 @@ async function main(): Promise<void> {
 			tray,
 			shortcut,
 			singleInstance,
-			folderPicker: new NativeFolderPickerPort(process.platform),
+			folderPicker: electronPorts?.folderPicker ?? new NativeFolderPickerPort(process.platform),
 			diagnosticsExport: (diagnostics) =>
 				exportDiagnostics(join(dataDirectory, "diagnostics"), diagnostics, { platform, node: process.version }),
 		},

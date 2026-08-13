@@ -525,8 +525,10 @@ export class DesktopApplication {
 				return this.options.ports.diagnosticsExport(this.diagnostics);
 			case "projects.list":
 				return this.projects;
-			case "projects.addFromFolder":
-				return this.addProject(await this.requireFolderPicker().selectProjectFolder());
+			case "projects.addFromFolder": {
+				const rootPath = await this.requireFolderPicker().selectProjectFolder();
+				return rootPath ? this.addProject(rootPath) : null;
+			}
 			case "projects.add":
 				return this.addProject(command.rootPath, command.name);
 			case "projects.select":
@@ -1063,7 +1065,13 @@ export class DesktopApplication {
 			await this.applyRuntimeTools();
 			const sessionPath = state.sessionPath ?? state.sessionRef;
 			const providerId = state.providerId ?? this.options.runtimeProviderId ?? "pi";
-			if (session && (sessionPath !== session.sessionPath || session.runtimeProviderId !== providerId)) {
+			if (
+				session &&
+				(sessionPath !== session.sessionPath ||
+					session.runtimeProviderId !== providerId ||
+					session.modelProvider !== state.modelProvider ||
+					session.modelId !== state.modelId)
+			) {
 				const updated = {
 					...session,
 					...(sessionPath ? { sessionPath } : {}),
@@ -1071,6 +1079,8 @@ export class DesktopApplication {
 					runtimeSessionRef: state.sessionRef ?? sessionPath ?? session.runtimeSessionRef ?? null,
 					sessionCodecId: session.sessionCodecId ?? (providerId === "pi" ? "pi-jsonl" : undefined),
 					sessionFormatVersion: session.sessionFormatVersion ?? (providerId === "pi" ? 3 : null),
+					modelProvider: state.modelProvider,
+					modelId: state.modelId,
 					updatedAt: now(),
 				};
 				if (this.draftSession?.id === session.id) this.draftSession = updated;
@@ -1117,12 +1127,17 @@ export class DesktopApplication {
 		const defaultProfile = this.models.find(
 			(candidate) => candidate.id === this.settings.defaultModelProfileId && candidate.enabled,
 		);
-		const sessionModel =
+		const sessionProfile =
 			session?.modelProvider && session.modelId
-				? { providerId: session.modelProvider, modelId: session.modelId }
+				? this.models.find(
+						(candidate) =>
+							candidate.enabled &&
+							candidate.providerId === session.modelProvider &&
+							candidate.modelId === session.modelId,
+					)
 				: undefined;
 		const selectedModel =
-			sessionModel ??
+			(sessionProfile ? { providerId: sessionProfile.providerId, modelId: sessionProfile.modelId } : undefined) ??
 			(defaultProfile ? { providerId: defaultProfile.providerId, modelId: defaultProfile.modelId } : undefined);
 		const activeProfile = selectedModel
 			? this.models.find(
@@ -1277,6 +1292,8 @@ export class DesktopApplication {
 	private async prompt(text: string, queueMode: "prompt" | "steer" | "followUp"): Promise<null> {
 		if (!this.runtime || !this.activeSessionId)
 			throw new DesktopError("NOT_READY", "Create or select a session before prompting");
+		if (this.runtime.status !== "ready" && this.runtime.status !== "streaming")
+			throw new DesktopError("NOT_READY", this.runtime.lastError ?? "Runtime is not ready");
 		if (!text.trim()) throw new DesktopError("INVALID_ARGUMENT", "Prompt cannot be empty");
 		if (this.runtime.isStreaming && queueMode === "prompt")
 			throw new DesktopError("CONFLICT", "Choose steer or follow-up while Pi is streaming");

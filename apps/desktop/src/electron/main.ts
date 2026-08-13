@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { app, BrowserWindow, globalShortcut, Menu, nativeImage, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, Menu, nativeImage, safeStorage, shell, Tray } from "electron";
 import {
 	type ElectronShellEvent,
 	type ElectronShellRequest,
@@ -245,19 +245,58 @@ async function handleHostMessage(value: unknown): Promise<void> {
 		return;
 	}
 	if (!isElectronShellRequest(value) || value.token !== hostToken) return;
-	const respond = (success: boolean, state = currentWindowState(), error?: string): void => {
+	const respond = (
+		success: boolean,
+		options: {
+			state?: ReturnType<typeof currentWindowState>;
+			folderPath?: string | null;
+			secretValue?: string;
+			protectedValue?: string;
+			error?: string;
+		} = {},
+	): void => {
 		const message: ElectronShellResponse = {
 			type: "pi-desktop.shell.response",
 			id: value.id,
 			token: hostToken,
 			success,
-			state,
-			...(error ? { error } : {}),
+			...(options.state ? { state: options.state } : {}),
+			...(options.folderPath !== undefined ? { folderPath: options.folderPath } : {}),
+			...(options.secretValue !== undefined ? { secretValue: options.secretValue } : {}),
+			...(options.protectedValue !== undefined ? { protectedValue: options.protectedValue } : {}),
+			...(options.error ? { error: options.error } : {}),
 		};
 		sendToHost(message);
 	};
 	try {
 		switch (value.operation) {
+			case "dialog.selectProjectFolder": {
+				const testFolder = process.env.PI_DESKTOP_TEST_FOLDER_PICKER_PATH;
+				if (testFolder) {
+					respond(true, { folderPath: testFolder });
+					return;
+				}
+				const result = window
+					? await dialog.showOpenDialog(window, {
+							properties: ["openDirectory", "createDirectory"],
+							title: "Select project folder",
+						})
+					: await dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"] });
+				respond(true, { folderPath: result.canceled ? null : (result.filePaths[0] ?? null) });
+				return;
+			}
+			case "secret.protect":
+				if (!safeStorage.isEncryptionAvailable()) throw new Error("Electron secure storage is unavailable");
+				if (value.secretValue === undefined) throw new Error("secretValue is required");
+				respond(true, { protectedValue: safeStorage.encryptString(value.secretValue).toString("base64") });
+				return;
+			case "secret.unprotect":
+				if (!safeStorage.isEncryptionAvailable()) throw new Error("Electron secure storage is unavailable");
+				if (!value.protectedValue) throw new Error("protectedValue is required");
+				respond(true, {
+					secretValue: safeStorage.decryptString(Buffer.from(value.protectedValue, "base64")),
+				});
+				return;
 			case "window.getState":
 				break;
 			case "window.show":
@@ -281,7 +320,7 @@ async function handleHostMessage(value: unknown): Promise<void> {
 				closeToTray = value.closeToTray;
 				break;
 			case "window.close":
-				respond(true);
+				respond(true, { state: currentWindowState() });
 				quitting = true;
 				app.quit();
 				return;
@@ -296,10 +335,13 @@ async function handleHostMessage(value: unknown): Promise<void> {
 				unregisterShortcut(value);
 				break;
 		}
-		respond(true);
+		respond(true, { state: currentWindowState() });
 		publishWindowState();
 	} catch (error: unknown) {
-		respond(false, currentWindowState(), error instanceof Error ? error.message : String(error));
+		respond(false, {
+			state: currentWindowState(),
+			error: error instanceof Error ? error.message : String(error),
+		});
 	}
 }
 

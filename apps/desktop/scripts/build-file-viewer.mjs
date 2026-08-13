@@ -32,7 +32,7 @@ async function inputStamp() {
 	const mermaid = await packageJson(join(root, "node_modules", "mermaid", "package.json"));
 	const esbuild = await packageJson(join(root, "node_modules", "esbuild", "package.json"));
 	const entryHashes = [];
-	for (const name of ["file-viewer-entry.mjs", "file-viewer-prism-entry.mjs", "build-file-viewer.mjs"]) {
+	for (const name of ["file-viewer-entry.mjs", "file-viewer-prism-entry.mjs", "build-file-viewer.mjs", "../src/renderer/markdown-renderer.mjs"]) {
 		entryHashes.push(createHash("sha1").update(await readFile(join(here, name))).digest("hex").slice(0, 12));
 	}
 	return JSON.stringify({
@@ -49,7 +49,7 @@ async function stampMatches() {
 	try {
 		const [current, stored] = await Promise.all([inputStamp(), readFile(stampPath, "utf8")]);
 		if (current !== stored) return false;
-		for (const name of ["index.js", "prism.js", "style.css", join("mermaid", "mermaid.esm.mjs")]) {
+		for (const name of ["index.js", "markdown.js", "prism.js", "style.css", join("mermaid", "mermaid.esm.mjs")]) {
 			try {
 				await stat(join(target, name));
 			} catch {
@@ -98,6 +98,19 @@ const rewritten = bundle
 	.replace(/import\("prismjs"\)/g, 'import("./prism.js")')
 	.replace(/import\("mermaid"\)/g, 'import("./mermaid/mermaid.esm.mjs")');
 await writeFile(join(target, "index.js"), rewritten);
+
+// Markdown is bundled separately so the renderer can use a full GFM parser
+// without exposing node_modules through the local HTTP host.
+await build({
+	entryPoints: [join(appDirectory, "src", "renderer", "markdown-renderer.mjs")],
+	bundle: true,
+	format: "esm",
+	platform: "browser",
+	target: "es2022",
+	outfile: join(target, "markdown.js"),
+	minify: true,
+	logLevel: "warning",
+});
 
 // Prism core + all language components as one lazy module. The viewer code
 // imports it for both `prismjs` and `prismjs/components/*`, and the single

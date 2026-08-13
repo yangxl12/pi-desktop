@@ -1,5 +1,6 @@
 import { createElement, icons } from "/vendor/lucide/lucide.mjs";
 import { createViewer, imagePlugin, textPlugin } from "/vendor/open-file-viewer/index.js";
+import { renderMarkdown as parseMarkdown } from "/vendor/open-file-viewer/markdown.js";
 import { commandTokenAtCaret, cycleSelection, filterSlashCommands, replaceCommandToken } from "/slash-menu.mjs";
 
 let desktopState = null;
@@ -32,6 +33,8 @@ const responseDurations = new Map();
 let contextMenuTarget = null;
 let previewState = null;
 let previewViewer = null;
+let addingProject = false;
+let savingModel = false;
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -51,10 +54,12 @@ const translations = {
 		"project.rename": "重命名项目",
 		"projects": "项目",
 		"projects.add": "添加项目",
+		"projects.selecting": "正在选择项目文件夹",
 		"projects.addHint": "添加本地项目文件夹后开始使用。",
 		"history": "历史对话",
 		"history.empty": "暂无历史对话",
 		"runtime.none": "未启动运行时",
+		"runtime.needsProject": "请先添加项目",
 		"settings": "设置",
 		"sidebar.collapse": "收起侧边栏",
 		"sidebar.expand": "展开侧边栏",
@@ -104,6 +109,7 @@ const translations = {
 		"settings.apiKey": "API 密钥",
 		"settings.apiKeyStored": "密钥已安全保存，留空则保持不变",
 		"settings.save": "保存",
+		"settings.saving": "正在保存",
 		"settings.reset": "恢复默认",
 		"settings.disabled": "关闭",
 		"settings.clearKey": "删除已保存的密钥",
@@ -213,10 +219,12 @@ const translations = {
 		"project.rename": "Rename project",
 		"projects": "Projects",
 		"projects.add": "Add project",
+		"projects.selecting": "Selecting project folder",
 		"projects.addHint": "Add a local project folder to begin.",
 		"history": "Conversation history",
 		"history.empty": "No conversation history",
 		"runtime.none": "No runtime",
+		"runtime.needsProject": "Add a project to begin",
 		"settings": "Settings",
 		"sidebar.collapse": "Collapse sidebar",
 		"sidebar.expand": "Expand sidebar",
@@ -266,6 +274,7 @@ const translations = {
 		"settings.apiKey": "API key",
 		"settings.apiKeyStored": "Stored securely; leave blank to keep",
 		"settings.save": "Save",
+		"settings.saving": "Saving",
 		"settings.reset": "Reset",
 		"settings.disabled": "Disabled",
 		"settings.clearKey": "Remove saved key",
@@ -478,7 +487,17 @@ function renderHeader() {
 	const runtime = desktopState.runtime;
 	const status = runtime?.status ?? "idle";
 	byId("runtime-dot").className = `status-dot ${status}`;
-	byId("runtime-mini-label").textContent = runtime ? status[0].toUpperCase() + status.slice(1) : t("runtime.none");
+	byId("runtime-mini-label").textContent = runtime
+		? status[0].toUpperCase() + status.slice(1)
+		: desktopState.activeProjectId
+			? t("runtime.none")
+			: t("runtime.needsProject");
+	for (const addProjectButton of document.querySelectorAll('[data-action="add-project"]')) {
+		addProjectButton.disabled = addingProject;
+		addProjectButton.setAttribute("aria-busy", String(addingProject));
+		addProjectButton.title = addingProject ? t("projects.selecting") : t("projects.add");
+		addProjectButton.setAttribute("aria-label", addProjectButton.title);
+	}
 	const modelSelect = byId("model-select");
 	const enabledModels = desktopState.models.filter((model) => model.enabled);
 	modelSelect.innerHTML = `<option value="">${t("model")}</option>${enabledModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.displayName)}</option>`).join("")}`;
@@ -619,13 +638,7 @@ function collapseAssistantMessages(messages) {
 }
 
 function renderMarkdown(value) {
-	let html = escapeHtml(value);
-	html = html.replace(/```([^\n]*)\n?([\s\S]*?)```/g, (_match, language, code) => `<pre><code class="language-${escapeHtml(language.trim())}">${code}</code></pre>`);
-	html = html.replace(/^### (.*)$/gm, "<h3>$1</h3>").replace(/^## (.*)$/gm, "<h2>$1</h2>").replace(/^# (.*)$/gm, "<h1>$1</h1>");
-	html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>");
-	html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
-	html = html.replace(/\[([^\]]+)\]\(([^)"']+\.(?:md|markdown|html?|json|ya?ml|toml|txt|csv|svg|png|jpe?g|gif|webp|avif|bmp|ico|pdf|docx|xlsx|pptx|zip))\)/gi, (_match, label, filePath) => `<a href="#" data-action="preview-file" data-file-path="${escapeHtml(filePath)}" title="${t("preview.open")}">${label}</a>`);
-	return html.replace(/\n/g, "<br>");
+	return parseMarkdown(value, { previewTitle: t("preview.open") });
 }
 
 const previewPathExtension = (path) => {
@@ -1107,7 +1120,7 @@ function renderModelsSettings(content) {
 			<label class="form-field"><span>${t("settings.modelId")}</span><input name="modelId" required value="${escapeHtml(editing?.modelId ?? "")}"></label>
 			<label class="form-field"><span>${t("settings.apiKey")}</span><input name="apiKey" type="password" autocomplete="new-password" placeholder="${editing?.credentialRef ? t("settings.apiKeyStored") : ""}"></label>
 			<label class="form-field"><span><input name="enabled" type="checkbox" ${editing?.enabled === false ? "" : "checked"}> ${t("settings.enabled")}</span></label>
-			<div class="form-actions full">${editing ? `<button type="button" class="text-button" data-action="cancel-model-edit">${t("settings.cancel")}</button>` : ""}<button class="text-button primary" type="submit"><span data-icon="save"></span> ${t("settings.save")}</button></div>
+			<div class="form-actions full">${editing ? `<button type="button" class="text-button" data-action="cancel-model-edit" ${savingModel ? "disabled" : ""}>${t("settings.cancel")}</button>` : ""}<button class="text-button primary" type="submit" ${savingModel ? 'disabled aria-busy="true"' : ""}><span data-icon="${savingModel ? "loader-circle" : "save"}"></span> ${savingModel ? t("settings.saving") : t("settings.save")}</button></div>
 		</form></div>
 		<div class="settings-card"><h3>${t("settings.defaultModel")}</h3><form id="default-model-form"><label class="form-field"><select name="defaultModelProfileId" ${enabledModels.length === 0 ? "disabled" : ""}><option value="">${enabledModels.length === 0 ? t("settings.noModels") : t("settings.defaultModel")}</option>${enabledModels.map((model) => `<option value="${escapeHtml(model.id)}" ${desktopState.settings.defaultModelProfileId === model.id ? "selected" : ""}>${escapeHtml(model.displayName)}</option>`).join("")}</select></label><div class="form-actions"><button class="text-button primary" type="submit" ${enabledModels.length === 0 ? "disabled" : ""}><span data-icon="save"></span> ${t("settings.save")}</button></div></form></div>
 		<div class="settings-card"><h3>${t("settings.profiles")}</h3>${desktopState.models.length === 0 ? `<div class="muted">${t("settings.noModels")}</div>` : desktopState.models.map((model) => `<div class="model-row"><div class="model-info"><strong>${escapeHtml(model.displayName)}${model.enabled ? "" : ` / ${t("settings.disabled")}`}</strong><span>${escapeHtml(model.providerId)}/${escapeHtml(model.modelId)} / ${escapeHtml(model.baseUrl)}${model.credentialRef ? ` / ${t("settings.apiKeyStored")}` : ""}</span></div><div class="model-actions"><button class="icon-button" data-action="default-model" data-profile-id="${escapeHtml(model.id)}" title="${t("settings.default")}" aria-label="${t("settings.default")}"><span data-icon="star"></span></button><button class="icon-button" data-action="test-model" data-profile-id="${escapeHtml(model.id)}" title="${t("settings.test")}" aria-label="${t("settings.test")}"><span data-icon="plug-zap"></span></button><button class="icon-button" data-action="edit-model" data-profile-id="${escapeHtml(model.id)}" title="${t("settings.editModel")}" aria-label="${t("settings.editModel")}"><span data-icon="pencil"></span></button><button class="icon-button" data-action="delete-model" data-profile-id="${escapeHtml(model.id)}" title="${t("settings.delete")}" aria-label="${t("settings.delete")}"><span data-icon="trash-2"></span></button></div></div>`).join("")}</div>
@@ -1255,6 +1268,14 @@ async function refreshProjectSessions() {
 }
 
 async function refresh(includeProjectSessions = true) {
+	const activeElement = document.activeElement;
+	if (
+		!savingModel &&
+		settingsOpen &&
+		settingsTab === "models" &&
+		activeElement instanceof HTMLElement &&
+		activeElement.closest("#model-form")
+	) return;
 	try {
 		const previousSessionId = desktopState?.activeSessionId;
 		desktopState = await (await fetch("/api/state", { cache: "no-store" })).json();
@@ -1447,6 +1468,13 @@ function applyDesktopEvent(event) {
 		return true;
 	}
 	if (event.type === "diagnostic") {
+		const activeElement = document.activeElement;
+		if (
+			settingsOpen &&
+			settingsTab === "models" &&
+			activeElement instanceof HTMLElement &&
+			activeElement.closest("#model-form")
+		) return true;
 		scheduleRefresh(false);
 		return true;
 	}
@@ -1522,7 +1550,21 @@ document.addEventListener("click", async (event) => {
 	if (!actionTarget) return;
 	event.preventDefault();
 	const action = actionTarget.dataset.action;
-	if (action === "add-project") await run({ type: "projects.addFromFolder" });
+	if (action === "add-project") {
+		if (addingProject) return;
+		addingProject = true;
+		renderHeader();
+		try {
+			const project = await command({ type: "projects.addFromFolder" });
+			if (project) await refresh();
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), "error");
+			await refresh();
+		} finally {
+			addingProject = false;
+			if (desktopState) renderHeader();
+		}
+	}
 	else if (action === "select-project") { closePreview(); await run({ type: "projects.select", projectId: actionTarget.dataset.projectId }); }
 	else if (action === "toggle-project") {
 		const projectId = actionTarget.dataset.projectId;
@@ -1641,12 +1683,24 @@ document.addEventListener("submit", async (event) => {
 		if (result !== undefined) { input.value = ""; selectedQueue = null; renderSlashMenu(); }
 	} else if (event.target.id === "model-form") {
 		event.preventDefault();
+		if (savingModel) return;
 		const data = new FormData(event.target);
 		const profile = { displayName: data.get("displayName"), providerId: data.get("providerId"), baseUrl: data.get("baseUrl"), modelId: data.get("modelId"), enabled: data.get("enabled") === "on" };
 		const apiKey = data.get("apiKey") || undefined;
 		const commandValue = editingModelId ? { type: "models.update", profileId: editingModelId, patch: profile, apiKey } : { type: "models.create", profile, apiKey };
-		const result = await run(commandValue, t("toast.modelSaved"));
-		if (result) { editingModelId = null; renderSettings(); }
+		savingModel = true;
+		renderSettings();
+		try {
+			const result = await command(commandValue);
+			showToast(t("toast.modelSaved"));
+			if (result) editingModelId = null;
+			await refresh();
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), "error");
+		} finally {
+			savingModel = false;
+			if (desktopState && settingsOpen && settingsTab === "models") renderSettings();
+		}
 	} else if (event.target.id === "global-prompt-form") {
 		event.preventDefault();
 		await run({ type: "settings.update", patch: { globalSystemPrompt: new FormData(event.target).get("globalSystemPrompt") } }, t("toast.saved"));

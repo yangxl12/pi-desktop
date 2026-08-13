@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { ShortcutPort, TrayPort, WindowPort } from "@earendil-works/pi-desktop-core";
+import type { FolderPickerPort, ShortcutPort, TrayPort, WindowPort } from "@earendil-works/pi-desktop-core";
 import type { WindowState } from "@earendil-works/pi-desktop-protocol";
 import {
 	type ElectronShellEvent,
 	type ElectronShellOperation,
 	type ElectronShellRequest,
+	type ElectronShellResponse,
 	isElectronShellEvent,
 	isElectronShellResponse,
 } from "../shared/electron-shell-ipc.ts";
@@ -17,7 +18,7 @@ export interface ElectronShellTransport {
 }
 
 interface PendingRequest {
-	resolve(state: WindowState | undefined): void;
+	resolve(response: ElectronShellResponse): void;
 	reject(error: Error): void;
 	timeout: NodeJS.Timeout;
 }
@@ -37,14 +38,15 @@ export class ElectronShellBridge {
 
 	request(
 		operation: ElectronShellOperation,
-		options: Pick<ElectronShellRequest, "shortcut" | "closeToTray"> = {},
-	): Promise<WindowState | undefined> {
+		options: Pick<ElectronShellRequest, "shortcut" | "closeToTray" | "secretValue" | "protectedValue"> = {},
+		timeoutMs = 5_000,
+	): Promise<ElectronShellResponse> {
 		const id = randomUUID();
-		return new Promise<WindowState | undefined>((resolve, reject) => {
+		return new Promise<ElectronShellResponse>((resolve, reject) => {
 			const timeout = setTimeout(() => {
 				this.pending.delete(id);
 				reject(new Error(`Electron shell request timed out: ${operation}`));
-			}, 5_000);
+			}, timeoutMs);
 			this.pending.set(id, { resolve, reject, timeout });
 			try {
 				this.transport.send({ type: "pi-desktop.shell.request", id, token: this.token, operation, ...options });
@@ -76,7 +78,7 @@ export class ElectronShellBridge {
 			if (!pending) return;
 			clearTimeout(pending.timeout);
 			this.pending.delete(value.id);
-			if (value.success) pending.resolve(value.state);
+			if (value.success) pending.resolve(value);
 			else pending.reject(new Error(value.error ?? "Electron shell request failed"));
 			return;
 		}
@@ -141,10 +143,10 @@ export class ElectronWindowPort implements WindowPort {
 
 	private async run(
 		operation: ElectronShellOperation,
-		options: Pick<ElectronShellRequest, "shortcut" | "closeToTray"> = {},
+		options: Pick<ElectronShellRequest, "shortcut" | "closeToTray" | "secretValue" | "protectedValue"> = {},
 	): Promise<void> {
-		const state = await this.bridge.request(operation, options);
-		if (state) this.setState(state);
+		const response = await this.bridge.request(operation, options);
+		if (response.state) this.setState(response.state);
 	}
 
 	private setState(state: WindowState): void {
@@ -196,10 +198,45 @@ export class ElectronShortcutPort implements ShortcutPort {
 	}
 }
 
+export class ElectronFolderPickerPort implements FolderPickerPort {
+	private readonly bridge: ElectronShellBridge;
+
+	constructor(bridge: ElectronShellBridge) {
+		this.bridge = bridge;
+	}
+
+	async selectProjectFolder(): Promise<string | null> {
+		const response = await this.bridge.request("dialog.selectProjectFolder", {}, 5 * 60_000);
+		return response.folderPath ?? null;
+	}
+}
+
+export class ElectronSecretProtectionPort {
+	private readonly bridge: ElectronShellBridge;
+
+	constructor(bridge: ElectronShellBridge) {
+		this.bridge = bridge;
+	}
+
+	async protect(value: string): Promise<string> {
+		const response = await this.bridge.request("secret.protect", { secretValue: value });
+		if (!response.protectedValue) throw new Error("Electron secure storage returned no protected value");
+		return response.protectedValue;
+	}
+
+	async unprotect(value: string): Promise<string> {
+		const response = await this.bridge.request("secret.unprotect", { protectedValue: value });
+		if (response.secretValue === undefined) throw new Error("Electron secure storage returned no secret value");
+		return response.secretValue;
+	}
+}
+
 export class ElectronDesktopPorts {
 	readonly window: ElectronWindowPort;
 	readonly tray: ElectronTrayPort;
 	readonly shortcut: ElectronShortcutPort;
+	readonly folderPicker: ElectronFolderPickerPort;
+	readonly secretProtection: ElectronSecretProtectionPort;
 	private readonly bridge: ElectronShellBridge;
 
 	constructor(bridge: ElectronShellBridge) {
@@ -207,6 +244,8 @@ export class ElectronDesktopPorts {
 		this.window = new ElectronWindowPort(bridge);
 		this.tray = new ElectronTrayPort(bridge);
 		this.shortcut = new ElectronShortcutPort(bridge);
+		this.folderPicker = new ElectronFolderPickerPort(bridge);
+		this.secretProtection = new ElectronSecretProtectionPort(bridge);
 	}
 
 	refresh(): Promise<void> {

@@ -63,7 +63,18 @@ function state() {
 			messageCount: 0,
 			lastError: null,
 		},
-		messages: [],
+		messages: [
+			{
+				id: "markdown-answer",
+				role: "assistant",
+				status: "finished",
+				createdAt: "2026-08-05T00:00:01.000Z",
+				parts: [{
+					type: "text",
+					text: "| Item | State |\n| --- | --- |\n| build | ready |\n\n- first\n  - nested\n\n> quoted\n\n```js\nconst answer = 42;\n```\n\n<script>window.markdownXss = true</script>",
+				}],
+			},
+		],
 		models: [],
 		commands: [
 			{ name: "skill:review", description: "Review the current change", source: "skill", scope: "user" },
@@ -159,6 +170,10 @@ async function startHarness() {
 	if (!address || typeof address === "string") throw new Error("E2E fixture did not bind a TCP port");
 	return {
 		url: `http://127.0.0.1:${address.port}`,
+		emitDiagnostic() {
+			const frame = `event: desktop\ndata: ${JSON.stringify({ type: "diagnostic" })}\n\n`;
+			for (const response of openResponses) response.write(frame);
+		},
 		async close() {
 			for (const response of openResponses) response.end();
 			await new Promise((resolveServer) => server.close(resolveServer));
@@ -244,6 +259,30 @@ async function assertSlashMenu(page, name, width, height) {
 	assert.equal(await input.inputValue(), "/skill:review ");
 }
 
+async function assertModelFormSurvivesDiagnostic(page, harness) {
+	await page.goto(process.env.PI_DESKTOP_E2E_URL, { timeout: 90_000 });
+	await page.locator('[data-action="open-settings"]').first().click();
+	const providerInput = page.locator('#model-form input[name="providerId"]');
+	await providerInput.fill("provider-draft");
+	await providerInput.focus();
+	harness.emitDiagnostic();
+	await delay(100);
+	assert.equal(await providerInput.inputValue(), "provider-draft");
+	assert.equal(await providerInput.evaluate((input) => input === document.activeElement), true);
+}
+
+async function assertAssistantMarkdown(page) {
+	await page.goto(process.env.PI_DESKTOP_E2E_URL, { timeout: 90_000 });
+	const body = page.locator('[data-message-id="markdown-answer"] .markdown-body');
+	await body.waitFor();
+	assert.equal(await body.locator("table").count(), 1);
+	assert.equal(await body.locator("ul ul").count(), 1);
+	assert.equal(await body.locator("blockquote").count(), 1);
+	assert.equal(await body.locator("pre code.language-js").textContent(), "const answer = 42;\n");
+	assert.equal(await body.locator("script").count(), 0);
+	assert.match(await body.textContent(), /<script>window\.markdownXss = true<\/script>/);
+}
+
 await rm(outputDirectory, { recursive: true, force: true });
 await mkdir(outputDirectory, { recursive: true });
 const harness = await startHarness();
@@ -255,6 +294,8 @@ try {
 		const page = await browser.newPage({ viewport: { width: 1220, height: 800 } });
 		await assertSlashMenu(page, "chromium", 1220, 800);
 		await assertSlashMenu(page, "chromium", 880, 600);
+		await assertModelFormSurvivesDiagnostic(page, harness);
+		await assertAssistantMarkdown(page);
 	} finally {
 		await browser.close();
 	}
@@ -275,6 +316,8 @@ try {
 		const page = await waitForElectronPage(electronBrowser);
 		await assertSlashMenu(page, "electron", 1220, 800);
 		await assertSlashMenu(page, "electron", 880, 600);
+		await assertModelFormSurvivesDiagnostic(page, harness);
+		await assertAssistantMarkdown(page);
 	} finally {
 		await electronBrowser?.close();
 		await stopElectron(electronProcess);

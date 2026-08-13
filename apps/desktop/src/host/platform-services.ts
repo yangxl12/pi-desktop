@@ -11,6 +11,11 @@ interface ProcessResult {
 	stderr: string;
 }
 
+export interface WindowsSecretProtectionPort {
+	protect(value: string): Promise<string>;
+	unprotect(value: string): Promise<string>;
+}
+
 function runProcess(command: string, args: string[], input?: string): Promise<ProcessResult> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
@@ -40,10 +45,12 @@ export class PlatformSecretStore implements SecretStore {
 	private readonly dataPath: string;
 	private readonly platform: NodeJS.Platform;
 	private readonly service = "Pi Desktop";
+	private readonly windowsProtection?: WindowsSecretProtectionPort;
 
-	constructor(dataDirectory: string, platform = process.platform) {
+	constructor(dataDirectory: string, platform = process.platform, windowsProtection?: WindowsSecretProtectionPort) {
 		this.dataPath = join(dataDirectory, "secrets.json");
 		this.platform = platform;
+		this.windowsProtection = windowsProtection;
 	}
 
 	async set(value: string, ref = `secret_${randomUUID()}`): Promise<string> {
@@ -91,6 +98,13 @@ export class PlatformSecretStore implements SecretStore {
 	}
 
 	private async protectWindows(value: string): Promise<string> {
+		if (this.windowsProtection) {
+			try {
+				return await this.windowsProtection.protect(value);
+			} catch {
+				// Fall back for browser-host mode and systems where Electron safeStorage is unavailable.
+			}
+		}
 		const script =
 			"Add-Type -AssemblyName System.Security; [Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes([Console]::In.ReadToEnd()),$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser))";
 		return assertProcess(
@@ -100,6 +114,13 @@ export class PlatformSecretStore implements SecretStore {
 	}
 
 	private async unprotectWindows(value: string): Promise<string | null> {
+		if (this.windowsProtection) {
+			try {
+				return await this.windowsProtection.unprotect(value);
+			} catch {
+				// Values written by older versions still use the PowerShell DPAPI format.
+			}
+		}
 		const script =
 			"Add-Type -AssemblyName System.Security; [Text.Encoding]::UTF8.GetString([System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String([Console]::In.ReadToEnd()),$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser))";
 		try {

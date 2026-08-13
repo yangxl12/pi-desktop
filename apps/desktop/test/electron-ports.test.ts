@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
 	ElectronShellBridge,
+	ElectronFolderPickerPort,
+	ElectronSecretProtectionPort,
 	ElectronShortcutPort,
 	ElectronTrayPort,
 	ElectronWindowPort,
@@ -19,6 +21,36 @@ class FakeTransport implements ElectronShellTransport {
 
 	send(request: ElectronShellRequest): void {
 		this.requests.push(request);
+		if (request.operation === "dialog.selectProjectFolder") {
+			this.listener?.({
+				type: "pi-desktop.shell.response",
+				id: request.id,
+				token: request.token,
+				success: true,
+				folderPath: "D:\\项目",
+			} satisfies ElectronShellResponse);
+			return;
+		}
+		if (request.operation === "secret.protect") {
+			this.listener?.({
+				type: "pi-desktop.shell.response",
+				id: request.id,
+				token: request.token,
+				success: true,
+				protectedValue: `protected:${request.secretValue}`,
+			} satisfies ElectronShellResponse);
+			return;
+		}
+		if (request.operation === "secret.unprotect") {
+			this.listener?.({
+				type: "pi-desktop.shell.response",
+				id: request.id,
+				token: request.token,
+				success: true,
+				secretValue: request.protectedValue?.replace(/^protected:/, "") ?? "",
+			} satisfies ElectronShellResponse);
+			return;
+		}
 		if (request.operation === "window.hide") this.state.visible = false;
 		if (request.operation === "window.show") this.state.visible = true;
 		if (request.operation === "window.setCloseToTray" && request.closeToTray !== undefined)
@@ -78,6 +110,28 @@ describe("Electron desktop ports", () => {
 			"window.setCloseToTray",
 			"shortcut.register",
 		]);
+		bridge.dispose();
+	});
+
+	it("selects project folders through the Electron shell bridge", async () => {
+		const transport = new FakeTransport();
+		const bridge = new ElectronShellBridge("test-token", transport);
+		const folderPicker = new ElectronFolderPickerPort(bridge);
+
+		await expect(folderPicker.selectProjectFolder()).resolves.toBe("D:\\项目");
+		expect(transport.requests).toHaveLength(1);
+		expect(transport.requests[0]?.operation).toBe("dialog.selectProjectFolder");
+		bridge.dispose();
+	});
+
+	it("protects secrets through the Electron shell bridge", async () => {
+		const transport = new FakeTransport();
+		const bridge = new ElectronShellBridge("test-token", transport);
+		const protection = new ElectronSecretProtectionPort(bridge);
+
+		await expect(protection.protect("api-key")).resolves.toBe("protected:api-key");
+		await expect(protection.unprotect("protected:api-key")).resolves.toBe("api-key");
+		expect(transport.requests.map((request) => request.operation)).toEqual(["secret.protect", "secret.unprotect"]);
 		bridge.dispose();
 	});
 });
